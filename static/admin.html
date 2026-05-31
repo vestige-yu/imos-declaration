@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>IMOS 管理后台</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <main class="shell compact">
+    <section class="workspace">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Admin</p>
+          <h1>规则维护</h1>
+        </div>
+        <span class="status" id="status">可上传</span>
+      </header>
+      <section class="panel upload-panel">
+        <form id="adminForm">
+          <label class="file-drop">
+            <span>报关单模板</span>
+            <strong id="templateName">选择 .xlsx 模板</strong>
+            <input id="template" name="template" type="file" accept=".xlsx">
+          </label>
+          <label class="file-drop">
+            <span>Daily Export List / HS 规则表</span>
+            <strong id="rulesName">选择 .xlsx 规则表</strong>
+            <input id="rules" name="rules" type="file" accept=".xlsx">
+          </label>
+          <button class="primary" type="submit">上传并启用</button>
+        </form>
+      </section>
+      <section class="panel" id="resultPanel" hidden>
+        <div class="panel-title">
+          <h2>上传结果</h2>
+        </div>
+        <pre id="result"></pre>
+      </section>
+    </section>
+  </main>
+  <script>
+    const form = document.querySelector("#adminForm");
+    const statusEl = document.querySelector("#status");
+    const resultPanel = document.querySelector("#resultPanel");
+    const resultEl = document.querySelector("#result");
+    for (const id of ["template", "rules"]) {
+      document.querySelector(`#${id}`).addEventListener("change", event => {
+        document.querySelector(`#${id}Name`).textContent = event.target.files[0]?.name || "未选择";
+      });
+    }
+    form.addEventListener("submit", async event => {
+      event.preventDefault();
+      statusEl.textContent = "上传中";
+      const response = await fetch("/api/admin/rules", { method: "POST", body: new FormData(form) });
+      const data = await response.json();
+      resultPanel.hidden = false;
+      resultEl.textContent = JSON.stringify(data, null, 2);
+      statusEl.textContent = data.ok ? "已启用" : "上传失败";
+    });
+  </script>
+</body>
+</html>

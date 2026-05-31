@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.DS_Store
+
+outputs/
+storage/
+
+# Local test source files; keep production template/rules below in the repo.
+SP26000001*.xls
+报关单 IMOS SP26000001*.xlsx
