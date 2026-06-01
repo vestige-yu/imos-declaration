@@ -12,11 +12,8 @@ const linesEl = document.querySelector("#lines");
 const warningsEl = document.querySelector("#warnings");
 const documentsInput = document.querySelector("#documents");
 const documentsName = document.querySelector("#documentsName");
-const maintenanceForms = {
-  template: document.querySelector("#templateForm"),
-  rules: document.querySelector("#rulesForm")
-};
-const maintenanceTokens = { template: null, rules: null };
+const adminForm = document.querySelector("#adminForm");
+const adminResult = document.querySelector("#adminResult");
 
 documentsInput.addEventListener("change", event => {
   const files = Array.from(event.target.files || []);
@@ -30,9 +27,6 @@ for (const id of ["template", "rules"]) {
   const label = document.querySelector(`#${id}Name`);
   input.addEventListener("change", event => {
     label.textContent = event.target.files[0]?.name || "未选择";
-    maintenanceTokens[id] = null;
-    document.querySelector(`[data-enable="${id}"]`).disabled = true;
-    document.querySelector(`#${id}PreviewWrap`).hidden = true;
   });
 }
 
@@ -144,111 +138,23 @@ previewToggle.addEventListener("click", () => {
   previewToggle.setAttribute("aria-expanded", String(!collapsed));
 });
 
-function renderSheetSummary(sheets) {
-  return `
-    <div class="sheet-list">
-      ${sheets.map(sheet => `
-        <div class="sheet-item">
-          <strong>${escapeHtml(sheet.name)}</strong>
-          <span>${escapeHtml(sheet.rows)} 行 / ${escapeHtml(sheet.columns)} 列</span>
-        </div>
-      `).join("")}
-    </div>
-  `;
-}
-
-function renderMaintenancePreview(kind, preview) {
-  const wrap = document.querySelector(`#${kind}PreviewWrap`);
-  const target = document.querySelector(`#${kind}Preview`);
-  const samples = kind === "rules" && preview.samples?.length
-    ? `
-      <div class="sample-table">
-        <table>
-          <thead>
-            <tr>
-              <th>Part No</th>
-              <th>HS Code</th>
-              <th>商品名称</th>
-              <th>品牌</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${preview.samples.map(item => `
-              <tr>
-                <td>${escapeHtml(item.partNo)}</td>
-                <td>${escapeHtml(item.hsCode || "-")}</td>
-                <td>${escapeHtml(item.goodsName || "-")}</td>
-                <td>${escapeHtml(item.brand || "-")}</td>
-              </tr>
-            `).join("")}
-          </tbody>
-        </table>
-      </div>
-    `
-    : "";
-  target.innerHTML = `
-    <div class="preview-summary">
-      <strong>${escapeHtml(preview.filename)}</strong>
-      <span>${escapeHtml(preview.summary)}</span>
-    </div>
-    ${renderSheetSummary(preview.sheets || [])}
-    ${samples}
-  `;
-  wrap.hidden = false;
-  wrap.open = true;
-}
-
-async function previewMaintenanceFile(kind) {
-  const form = maintenanceForms[kind];
-  const input = document.querySelector(`#${kind}`);
-  if (!input.files.length) throw new Error("请先选择文件");
-  const body = new FormData(form);
-  body.append("kind", kind);
-  statusEl.textContent = kind === "template" ? "预览模板中" : "预览规则表中";
-  const response = await fetch("/api/admin/preview", { method: "POST", body });
-  const data = await response.json();
-  if (!data.ok) throw new Error(data.error || "预览失败");
-  maintenanceTokens[kind] = data.token;
-  document.querySelector(`[data-enable="${kind}"]`).disabled = false;
-  renderMaintenancePreview(kind, data.preview);
-  statusEl.textContent = "预览完成";
-}
-
-async function enableMaintenanceFile(kind) {
-  const token = maintenanceTokens[kind];
-  if (!token) throw new Error("请先预览文件");
-  statusEl.textContent = kind === "template" ? "启用模板中" : "启用规则表中";
-  const response = await fetch("/api/admin/enable", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ token })
-  });
-  const data = await response.json();
-  if (!data.ok) throw new Error(data.error || "启用失败");
-  maintenanceTokens[kind] = null;
-  document.querySelector(`[data-enable="${kind}"]`).disabled = true;
-  statusEl.textContent = "维护文件已启用";
-}
-
-for (const [kind, form] of Object.entries(maintenanceForms)) {
-  form.addEventListener("submit", async event => {
-    event.preventDefault();
-    try {
-      await previewMaintenanceFile(kind);
-    } catch (error) {
-      statusEl.textContent = "预览失败";
-      alert(error.message);
-    }
-  });
-}
-
-for (const button of document.querySelectorAll("[data-enable]")) {
-  button.addEventListener("click", async event => {
-    try {
-      await enableMaintenanceFile(event.currentTarget.dataset.enable);
-    } catch (error) {
-      statusEl.textContent = "启用失败";
-      alert(error.message);
-    }
-  });
-}
+adminForm.addEventListener("submit", async event => {
+  event.preventDefault();
+  statusEl.textContent = "上传维护文件中";
+  adminResult.hidden = true;
+  try {
+    const response = await fetch("/api/admin/rules", {
+      method: "POST",
+      credentials: "same-origin",
+      body: new FormData(adminForm)
+    });
+    const data = await response.json();
+    if (!data.ok) throw new Error(data.error || "上传失败");
+    adminResult.hidden = false;
+    adminResult.textContent = JSON.stringify(data.updated, null, 2);
+    statusEl.textContent = "维护文件已启用";
+  } catch (error) {
+    statusEl.textContent = "上传失败";
+    alert(error.message);
+  }
+});

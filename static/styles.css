@@ -230,17 +230,11 @@ h2 {
 
 .maintenance-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: minmax(220px, 1fr) minmax(220px, 1fr) auto;
   gap: 14px;
+  align-items: stretch;
 }
 
-.maintenance-block {
-  display: grid;
-  gap: 12px;
-  min-width: 0;
-}
-
-.maintenance-actions,
 .panel-actions {
   display: flex;
   gap: 10px;
@@ -248,8 +242,6 @@ h2 {
   align-items: stretch;
 }
 
-.maintenance-actions .primary,
-.maintenance-actions .secondary,
 .panel-actions .primary,
 .panel-actions .secondary {
   align-self: auto;
@@ -261,63 +253,12 @@ h2 {
   font-weight: 700;
 }
 
-.maintenance-preview {
+.admin-result {
+  margin-top: 14px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: #fbfcfd;
-}
-
-.maintenance-preview summary {
-  cursor: pointer;
   padding: 12px;
-  font-weight: 700;
-}
-
-.maintenance-preview > div {
-  border-top: 1px solid var(--line);
-  padding: 12px;
-}
-
-.preview-summary {
-  display: grid;
-  gap: 4px;
-  margin-bottom: 12px;
-}
-
-.preview-summary span {
-  color: var(--muted);
-  font-size: 13px;
-}
-
-.sheet-list {
-  display: grid;
-  gap: 8px;
-}
-
-.sheet-item {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  background: #fff;
-  padding: 8px 10px;
-}
-
-.sheet-item span {
-  color: var(--muted);
-  white-space: nowrap;
-}
-
-.sample-table {
-  margin-top: 12px;
-  overflow-x: auto;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-}
-
-.sample-table table {
-  min-width: 640px;
 }
 
 .table-wrap {
@@ -376,7 +317,6 @@ pre {
     grid-template-columns: 1fr;
   }
 
-  .maintenance-actions,
   .panel-actions {
     flex-direction: column;
   }

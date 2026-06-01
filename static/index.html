@@ -22,39 +22,24 @@
           <h2>规则和模板维护</h2>
           <span class="danger-note">不要随意调整规则和模板</span>
         </div>
-        <div class="maintenance-grid">
-          <form id="templateForm" class="maintenance-block" data-kind="template">
+        <form id="adminForm" class="admin-form">
+          <div class="maintenance-grid">
             <label class="file-drop">
               <span>报关单模板</span>
               <strong id="templateName">选择 .xlsx 模板</strong>
-              <input id="template" name="template" type="file" accept=".xlsx" required>
+              <input id="template" name="template" type="file" accept=".xlsx">
             </label>
-            <div class="maintenance-actions">
-              <button class="secondary" type="submit">预览</button>
-              <button class="primary" data-enable="template" type="button" disabled>启用</button>
-            </div>
-            <details class="maintenance-preview" id="templatePreviewWrap" hidden>
-              <summary>模板预览</summary>
-              <div id="templatePreview"></div>
-            </details>
-          </form>
 
-          <form id="rulesForm" class="maintenance-block" data-kind="rules">
             <label class="file-drop">
               <span>Daily Export List / HS 规则表</span>
               <strong id="rulesName">选择 .xlsx 规则表</strong>
-              <input id="rules" name="rules" type="file" accept=".xlsx" required>
+              <input id="rules" name="rules" type="file" accept=".xlsx">
             </label>
-            <div class="maintenance-actions">
-              <button class="secondary" type="submit">预览</button>
-              <button class="primary" data-enable="rules" type="button" disabled>启用</button>
-            </div>
-            <details class="maintenance-preview" id="rulesPreviewWrap" hidden>
-              <summary>规则表预览</summary>
-              <div id="rulesPreview"></div>
-            </details>
-          </form>
-        </div>
+
+            <button class="primary" type="submit">上传并启用</button>
+          </div>
+        </form>
+        <pre class="admin-result" id="adminResult" hidden></pre>
       </section>
 
       <section class="panel upload-panel">

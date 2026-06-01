@@ -677,29 +677,6 @@ def parse_packing(path):
     }
 
 
-def workbook_summary(path, sample_limit=4):
-    book = XlsxBook(path)
-    try:
-        sheets = []
-        for sheet_name in book.sheet_map:
-            rows = book.rows(sheet_name)
-            non_empty = [
-                [safe_text(value) for value in row]
-                for row in rows
-                if any(safe_text(value) for value in row)
-            ]
-            max_cols = max((len(row) for row in rows), default=0)
-            sheets.append({
-                "name": sheet_name,
-                "rows": len(non_empty),
-                "columns": max_cols,
-                "sample": [row[:8] for row in non_empty[:sample_limit]],
-            })
-        return sheets
-    finally:
-        book.close()
-
-
 def load_rules(path=None):
     path = Path(path) if path else active_rules_path()
     if not path.exists():
@@ -735,39 +712,6 @@ def load_rules(path=None):
     finally:
         book.close()
     return rules
-
-
-def preview_template(path, filename):
-    if Path(path).suffix.lower() != ".xlsx":
-        raise ValueError("模板文件必须是 .xlsx")
-    sheets = workbook_summary(path)
-    if not sheets:
-        raise ValueError("模板文件没有可读取的工作表")
-    return {
-        "filename": filename,
-        "sheets": sheets,
-        "summary": f"共 {len(sheets)} 个工作表",
-    }
-
-
-def preview_rules(path, filename):
-    if Path(path).suffix.lower() != ".xlsx":
-        raise ValueError("规则表必须是 .xlsx")
-    sheets = workbook_summary(path)
-    rules = load_rules(path)
-    if not rules:
-        raise ValueError("规则表未识别到 Part No / HS Code 规则")
-    samples = [
-        {"partNo": key, **value}
-        for key, value in list(rules.items())[:8]
-    ]
-    return {
-        "filename": filename,
-        "sheets": sheets,
-        "ruleCount": len(rules),
-        "samples": samples,
-        "summary": f"识别到 {len(rules)} 条规则",
-    }
 
 
 def merge_preview(invoice, packing, rules):
@@ -1088,7 +1032,6 @@ def detect_invoice_and_packing(paths):
 
 
 SESSIONS = {}
-PENDING_ADMIN_FILES = {}
 
 
 class AppHandler(BaseHTTPRequestHandler):
@@ -1130,10 +1073,6 @@ class AppHandler(BaseHTTPRequestHandler):
                 self.handle_parse()
             elif self.path == "/api/generate":
                 self.handle_generate()
-            elif self.path == "/api/admin/preview":
-                self.handle_admin_preview()
-            elif self.path == "/api/admin/enable":
-                self.handle_admin_enable()
             elif self.path == "/api/admin/rules":
                 self.handle_admin_rules()
             else:
@@ -1227,61 +1166,6 @@ class AppHandler(BaseHTTPRequestHandler):
         token = uuid.uuid4().hex
         SESSIONS[token] = {"path": str(path), "filename": filename, "created": time.time()}
         json_response(self, 200, {"ok": True, "downloadUrl": f"/download/{token}", "filename": filename})
-
-    def handle_admin_preview(self):
-        STORAGE_DIR.mkdir(exist_ok=True)
-        pending_dir = STORAGE_DIR / "pending"
-        pending_dir.mkdir(exist_ok=True)
-        form = parse_upload(self)
-        kind = safe_text(form.getfirst("kind") if "kind" in form else "")
-        if kind not in ("template", "rules"):
-            raise ValueError("未知维护文件类型")
-        field = form[kind] if kind in form else None
-        path = save_field_file(field, pending_dir, f"{kind}.xlsx")
-        if not path:
-            raise ValueError("请选择要预览的文件")
-        filename = Path(getattr(field, "filename", "")).name or path.name
-        preview = preview_template(path, filename) if kind == "template" else preview_rules(path, filename)
-        token = uuid.uuid4().hex
-        PENDING_ADMIN_FILES[token] = {
-            "kind": kind,
-            "path": str(path),
-            "filename": filename,
-            "preview": preview,
-            "created": time.time(),
-        }
-        json_response(self, 200, {"ok": True, "token": token, "kind": kind, "preview": preview})
-
-    def handle_admin_enable(self):
-        STORAGE_DIR.mkdir(exist_ok=True)
-        length = int(self.headers.get("Content-Length", "0"))
-        body = self.rfile.read(length)
-        data = json.loads(body.decode("utf-8") or "{}")
-        token = safe_text(data.get("token"))
-        item = PENDING_ADMIN_FILES.get(token)
-        if not item:
-            raise ValueError("预览已过期，请重新选择文件预览")
-        source = Path(item["path"])
-        if not source.exists():
-            raise ValueError("预览文件已失效，请重新选择文件预览")
-        target_name = "template.xlsx" if item["kind"] == "template" else "rules.xlsx"
-        target = STORAGE_DIR / target_name
-        shutil.copyfile(source, target)
-        updated = {
-            item["kind"]: {
-                "filename": item["filename"],
-                "updatedAt": now_stamp(),
-                "summary": item["preview"].get("summary", ""),
-            }
-        }
-        path = storage_meta_path()
-        meta = {}
-        if path.exists():
-            meta = json.loads(path.read_text("utf-8"))
-        meta.update(updated)
-        path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), "utf-8")
-        PENDING_ADMIN_FILES.pop(token, None)
-        json_response(self, 200, {"ok": True, "updated": updated, "active": meta})
 
     def handle_admin_rules(self):
         STORAGE_DIR.mkdir(exist_ok=True)
