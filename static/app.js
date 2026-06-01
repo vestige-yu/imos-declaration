@@ -10,6 +10,13 @@ const linesEl = document.querySelector("#lines");
 const warningsEl = document.querySelector("#warnings");
 const documentsInput = document.querySelector("#documents");
 const documentsName = document.querySelector("#documentsName");
+const adminPanel = document.querySelector("#adminPanel");
+const adminForm = document.querySelector("#adminForm");
+const adminResult = document.querySelector("#adminResult");
+
+if (window.location.pathname === "/suri-admin") {
+  adminPanel.hidden = false;
+}
 
 documentsInput.addEventListener("change", event => {
   const files = Array.from(event.target.files || []);
@@ -17,6 +24,14 @@ documentsInput.addEventListener("change", event => {
     ? files.map(file => file.name).join(" / ")
     : "一次选择两个文件";
 });
+
+for (const id of ["template", "rules"]) {
+  const input = document.querySelector(`#${id}`);
+  const label = document.querySelector(`#${id}Name`);
+  input.addEventListener("change", event => {
+    label.textContent = event.target.files[0]?.name || "未选择";
+  });
+}
 
 function fmt(value) {
   if (value === null || value === undefined || value === "") return "-";
@@ -102,5 +117,26 @@ generateBtn.addEventListener("click", async () => {
     alert(error.message);
   } finally {
     generateBtn.disabled = false;
+  }
+});
+
+adminForm.addEventListener("submit", async event => {
+  event.preventDefault();
+  statusEl.textContent = "上传维护文件中";
+  adminResult.hidden = true;
+  try {
+    const response = await fetch("/api/admin/rules", {
+      method: "POST",
+      credentials: "same-origin",
+      body: new FormData(adminForm)
+    });
+    const data = await response.json();
+    if (!data.ok) throw new Error(data.error || "上传失败");
+    adminResult.hidden = false;
+    adminResult.textContent = JSON.stringify(data.updated, null, 2);
+    statusEl.textContent = "维护文件已启用";
+  } catch (error) {
+    statusEl.textContent = "上传失败";
+    alert(error.message);
   }
 });

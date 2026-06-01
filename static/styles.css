@@ -206,6 +206,27 @@ h2 {
   line-height: 1.55;
 }
 
+.admin-form {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(220px, 1fr) auto;
+  gap: 14px;
+  align-items: stretch;
+}
+
+.danger-note {
+  color: #c01818;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.admin-result {
+  margin-top: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfcfd;
+  padding: 12px;
+}
+
 .table-wrap {
   width: 100%;
   overflow-x: auto;
@@ -256,6 +277,7 @@ pre {
   }
 
   .upload-panel form,
+  .admin-form,
   .summary-grid,
   .details {
     grid-template-columns: 1fr;

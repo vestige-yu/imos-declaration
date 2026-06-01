@@ -28,6 +28,27 @@
         </form>
       </section>
 
+      <section class="panel admin-panel" id="adminPanel" hidden>
+        <div class="panel-title">
+          <h2>规则和模板维护</h2>
+          <span class="danger-note">不要随意调整规则和模板</span>
+        </div>
+        <form id="adminForm" class="admin-form">
+          <label class="file-drop">
+            <span>报关单模板</span>
+            <strong id="templateName">选择 .xlsx 模板</strong>
+            <input id="template" name="template" type="file" accept=".xlsx">
+          </label>
+          <label class="file-drop">
+            <span>Daily Export List / HS 规则表</span>
+            <strong id="rulesName">选择 .xlsx 规则表</strong>
+            <input id="rules" name="rules" type="file" accept=".xlsx">
+          </label>
+          <button class="primary" type="submit">上传并启用</button>
+        </form>
+        <pre class="admin-result" id="adminResult" hidden></pre>
+      </section>
+
       <section class="summary-grid" id="summary" hidden>
         <div class="metric">
           <span>合同号</span>
