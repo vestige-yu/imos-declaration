@@ -10,16 +10,25 @@
   <main class="shell">
     <section class="workspace">
       <header class="topbar">
-        <div>
-          <p class="eyebrow">IMOS Customs Declaration</p>
-          <h1>报关单生成</h1>
+        <div class="brand-lockup">
+          <span class="brand-mark">IM</span>
+          <div>
+            <p class="eyebrow">IMOS Customs Declaration</p>
+            <h1>报关单生成</h1>
+          </div>
         </div>
         <span class="status" id="status">等待上传</span>
       </header>
 
       <section class="panel admin-panel" id="adminPanel">
-        <div class="panel-title">
-          <h2>规则和模板维护</h2>
+        <div class="section-head">
+          <div class="section-title">
+            <span class="section-index">01</span>
+            <div>
+              <p class="section-kicker">System Files</p>
+              <h2>规则和模板维护</h2>
+            </div>
+          </div>
           <span class="danger-note">不要随意调整规则和模板</span>
         </div>
         <form id="adminForm" class="admin-form">
@@ -43,6 +52,15 @@
       </section>
 
       <section class="panel upload-panel">
+        <div class="section-head">
+          <div class="section-title">
+            <span class="section-index">02</span>
+            <div>
+              <p class="section-kicker">Declaration Source</p>
+              <h2>报关资料上传</h2>
+            </div>
+          </div>
+        </div>
         <form id="uploadForm">
           <label class="file-drop">
             <span>Invoice + Packing list</span>
