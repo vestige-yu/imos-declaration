@@ -10,13 +10,8 @@ const linesEl = document.querySelector("#lines");
 const warningsEl = document.querySelector("#warnings");
 const documentsInput = document.querySelector("#documents");
 const documentsName = document.querySelector("#documentsName");
-const adminPanel = document.querySelector("#adminPanel");
 const adminForm = document.querySelector("#adminForm");
 const adminResult = document.querySelector("#adminResult");
-
-if (window.location.pathname === "/suri-admin") {
-  adminPanel.hidden = false;
-}
 
 documentsInput.addEventListener("change", event => {
   const files = Array.from(event.target.files || []);

@@ -1046,7 +1046,7 @@ class AppHandler(BaseHTTPRequestHandler):
             self.serve_static("index.html")
             return
         if path == "/suri-admin":
-            self.serve_static("index.html")
+            self.redirect("/")
             return
         if path == f"/admin/{ADMIN_TOKEN}":
             self.redirect("/suri-admin")
