@@ -1040,7 +1040,7 @@ class AppHandler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
         if path == "/":
-            self.redirect(f"/u/{PUBLIC_TOKEN}")
+            self.serve_static("index.html")
             return
         if path == f"/u/{PUBLIC_TOKEN}":
             self.serve_static("index.html")
