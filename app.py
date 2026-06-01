@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
+import base64
 import cgi
+import hmac
 import html
 import io
 import json
@@ -1045,8 +1047,13 @@ class AppHandler(BaseHTTPRequestHandler):
         if path == f"/u/{PUBLIC_TOKEN}":
             self.serve_static("index.html")
             return
-        if path == f"/admin/{ADMIN_TOKEN}":
+        if path == "/suri-admin":
+            if not self.require_admin_auth():
+                return
             self.serve_static("admin.html")
+            return
+        if path == f"/admin/{ADMIN_TOKEN}":
+            self.redirect("/suri-admin")
             return
         if path == "/favicon.ico":
             self.send_response(204)
@@ -1067,6 +1074,8 @@ class AppHandler(BaseHTTPRequestHandler):
             elif self.path == "/api/generate":
                 self.handle_generate()
             elif self.path == "/api/admin/rules":
+                if not self.require_admin_auth():
+                    return
                 self.handle_admin_rules()
             else:
                 self.send_error(HTTPStatus.NOT_FOUND, "Not found")
@@ -1077,6 +1086,22 @@ class AppHandler(BaseHTTPRequestHandler):
         self.send_response(302)
         self.send_header("Location", target)
         self.end_headers()
+
+    def require_admin_auth(self):
+        auth = self.headers.get("Authorization", "")
+        if auth.startswith("Basic "):
+            try:
+                raw = base64.b64decode(auth.split(" ", 1)[1]).decode("utf-8")
+                _, password = raw.split(":", 1)
+                if hmac.compare_digest(password, ADMIN_TOKEN):
+                    return True
+            except Exception:
+                pass
+        self.send_response(401)
+        self.send_header("WWW-Authenticate", 'Basic realm="IMOS Admin"')
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+        return False
 
     def serve_static(self, name):
         clean = posixpath.normpath(urllib.parse.unquote(name)).lstrip("/")
