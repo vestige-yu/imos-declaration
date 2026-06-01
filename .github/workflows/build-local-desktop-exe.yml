@@ -1,0 +1,32 @@
+name: Build local desktop exe
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "local_desktop_app/**"
+      - ".github/workflows/build-local-desktop-exe.yml"
+
+jobs:
+  build-windows-exe:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build exe
+        working-directory: local_desktop_app
+        shell: pwsh
+        run: .\build_windows.ps1
+
+      - name: Upload exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: IMOS报关单生成-windows-exe
+          path: local_desktop_app/dist/IMOS报关单生成.exe

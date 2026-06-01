@@ -1,0 +1,3 @@
+# Core parsing and workbook generation use only the Python standard library.
+pywebview>=5.0
+pyinstaller>=6.0

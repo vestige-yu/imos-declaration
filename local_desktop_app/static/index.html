@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>IMOS 报关单生成</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <main class="shell">
+    <section class="workspace">
+      <header class="topbar">
+        <div class="brand-lockup">
+          <span class="brand-mark">IM</span>
+          <div>
+            <p class="eyebrow">IMOS Customs Declaration</p>
+            <h1>报关单生成</h1>
+          </div>
+        </div>
+        <span class="status" id="status">等待上传</span>
+      </header>
+
+      <section class="panel admin-panel" id="adminPanel">
+        <div class="section-head">
+          <div class="section-title">
+            <span class="section-index">01</span>
+            <div>
+              <p class="section-kicker">System Files</p>
+              <h2>规则和模板维护</h2>
+            </div>
+          </div>
+          <span class="danger-note">不要随意调整规则和模板</span>
+        </div>
+        <form id="adminForm" class="admin-form">
+          <div class="maintenance-grid">
+            <label class="file-drop">
+              <span>报关单模板</span>
+              <strong id="templateName">选择 .xlsx 模板</strong>
+              <input id="template" name="template" type="file" accept=".xlsx">
+            </label>
+
+            <label class="file-drop">
+              <span>Daily Export List / HS 规则表</span>
+              <strong id="rulesName">选择 .xlsx 规则表</strong>
+              <input id="rules" name="rules" type="file" accept=".xlsx">
+            </label>
+
+            <button class="primary" type="submit">上传并启用</button>
+          </div>
+        </form>
+        <pre class="admin-result" id="adminResult" hidden></pre>
+      </section>
+
+      <section class="panel upload-panel">
+        <div class="section-head">
+          <div class="section-title">
+            <span class="section-index">02</span>
+            <div>
+              <p class="section-kicker">Declaration Source</p>
+              <h2>报关资料上传</h2>
+            </div>
+          </div>
+        </div>
+        <form id="uploadForm">
+          <label class="file-drop">
+            <span>Invoice + Packing list</span>
+            <strong id="documentsName">一次选择两个文件</strong>
+            <input id="documents" name="documents" type="file" accept=".xls,.xlsx" multiple required>
+          </label>
+          <button class="primary" type="submit">解析并预览</button>
+        </form>
+      </section>
+
+      <section class="panel history-panel">
+        <div class="panel-title">
+          <h2>历史记录</h2>
+          <button class="secondary" id="refreshHistoryBtn" type="button">刷新</button>
+        </div>
+        <div class="history-list" id="historyList">
+          <div class="empty-state">暂无历史记录</div>
+        </div>
+      </section>
+
+      <section class="summary-grid" id="summary" hidden>
+        <div class="metric">
+          <span>合同号</span>
+          <strong data-field="contractNo">-</strong>
+        </div>
+        <div class="metric">
+          <span>件数</span>
+          <strong data-field="packageCount">-</strong>
+        </div>
+        <div class="metric">
+          <span>毛重</span>
+          <strong data-field="grossWeight">-</strong>
+        </div>
+        <div class="metric">
+          <span>净重</span>
+          <strong data-field="netWeight">-</strong>
+        </div>
+        <div class="metric">
+          <span>总数量</span>
+          <strong data-field="totalQuantity">-</strong>
+        </div>
+        <div class="metric">
+          <span>总金额</span>
+          <strong data-field="totalAmount">-</strong>
+        </div>
+      </section>
+
+      <section class="panel" id="previewPanel" hidden>
+        <div class="panel-title">
+          <h2>预览</h2>
+          <div class="panel-actions">
+            <button class="secondary" id="previewToggle" type="button" aria-expanded="true">收起预览</button>
+            <button class="primary" id="generateBtn" type="button">生成并下载</button>
+          </div>
+        </div>
+        <div id="previewBody">
+          <div class="details">
+            <div><span>境外收货人</span><strong id="consignee">-</strong></div>
+            <div><span>成交方式</span><strong id="tradeTerm">-</strong></div>
+            <div><span>币制</span><strong id="currency">-</strong></div>
+          </div>
+          <div class="warnings" id="warnings" hidden></div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>项号</th>
+                  <th>HS Code</th>
+                  <th>商品名称</th>
+                  <th>品牌</th>
+                  <th>数量</th>
+                  <th>净重</th>
+                  <th>金额</th>
+                  <th>币制</th>
+                </tr>
+              </thead>
+              <tbody id="lines"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+    </section>
+  </main>
+  <script src="/static/app.js"></script>
+</body>
+</html>
