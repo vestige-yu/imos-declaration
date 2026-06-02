@@ -54,6 +54,25 @@ function setField(name, value) {
   if (el) el.textContent = fmt(value);
 }
 
+function sourceAnomalyText(anomalies) {
+  const lines = anomalies.slice(0, 25).map(item => {
+    const location = `${item.file || "文件"} ${item.sheet || ""} 第${item.row}行 ${item.column}列`;
+    return `${location}：${item.field || "字段"}异常${item.value ? `（${item.value}）` : ""}`;
+  });
+  if (anomalies.length > 25) {
+    lines.push(`还有 ${anomalies.length - 25} 条异常未显示`);
+  }
+  return `上传文件中发现 ${anomalies.length} 处数据异常：\n\n${lines.join("\n")}\n\n确认继续生成预览吗？`;
+}
+
+async function deleteHistorySilently(historyId) {
+  if (!historyId) return;
+  try {
+    await fetch(`/api/history/${encodeURIComponent(historyId)}`, { method: "DELETE" });
+  } catch (_) {
+  }
+}
+
 function downloadLink(record, kind, label, disabled = false) {
   if (disabled) return `<span class="history-disabled">${escapeHtml(label)}</span>`;
   return `<a href="/api/history/${encodeURIComponent(record.id)}/download?kind=${encodeURIComponent(kind)}">${escapeHtml(label)}</a>`;
@@ -113,8 +132,15 @@ function renderPreview(preview) {
   document.querySelector("#tradeTerm").textContent = fmt(preview.tradeTerm);
   document.querySelector("#currency").textContent = fmt(preview.currency);
 
-  warningsEl.hidden = !preview.warnings.length;
-  warningsEl.innerHTML = preview.warnings.map(item => `<div>${escapeHtml(item)}</div>`).join("");
+  const warningMessages = [...(preview.warnings || [])];
+  if (preview.sourceAnomalies?.length) {
+    warningMessages.push(`上传文件中有 ${preview.sourceAnomalies.length} 处数据异常，已按确认继续处理。`);
+    for (const item of preview.sourceAnomalies.slice(0, 10)) {
+      warningMessages.push(item.message || `${item.file} ${item.cell} 数据异常`);
+    }
+  }
+  warningsEl.hidden = !warningMessages.length;
+  warningsEl.innerHTML = warningMessages.map(item => `<div>${escapeHtml(item)}</div>`).join("");
 
   linesEl.innerHTML = preview.commodityLines.map(line => `
     <tr>
@@ -151,6 +177,12 @@ uploadForm.addEventListener("submit", async event => {
     const response = await fetch("/api/parse", { method: "POST", body: new FormData(uploadForm) });
     const data = await response.json();
     if (!data.ok) throw new Error(data.error || "解析失败");
+    if (data.preview?.sourceAnomalies?.length && !confirm(sourceAnomalyText(data.preview.sourceAnomalies))) {
+      await deleteHistorySilently(data.historyId);
+      statusEl.textContent = "已取消";
+      loadHistory();
+      return;
+    }
     currentSession = data.sessionId;
     currentHistoryId = data.historyId;
     currentPreview = data.preview;

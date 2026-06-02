@@ -5,6 +5,7 @@ import io
 import json
 import os
 import posixpath
+import random
 import re
 import shutil
 import sqlite3
@@ -57,6 +58,8 @@ MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", str(25 * 1024 * 1024))
 
 NS_MAIN = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 NS_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+NS_PACKAGE_REL = "http://schemas.openxmlformats.org/package/2006/relationships"
+NS_CONTENT_TYPES = "http://schemas.openxmlformats.org/package/2006/content-types"
 ET.register_namespace("", NS_MAIN)
 
 
@@ -674,6 +677,9 @@ def row_contains(row, *terms):
     return all(term.lower() in text for term in terms)
 
 
+EXCEL_ERROR_VALUES = {"#N/A", "#VALUE!", "#REF!", "#DIV/0!", "#NUM!", "#NAME?", "#NULL!", "N/A", "NA"}
+
+
 def normalized_header(row):
     return [safe_text(v).lower().replace(" ", "").replace("_", "") for v in row]
 
@@ -692,14 +698,82 @@ def find_header_row(rows, required_any_groups):
     return None
 
 
+def excel_col_name(col):
+    name = ""
+    col += 1
+    while col:
+        col, rem = divmod(col - 1, 26)
+        name = chr(65 + rem) + name
+    return name
+
+
+def anomaly(file_kind, sheet_idx, row_idx, col_idx, field, value, reason):
+    cell = f"{excel_col_name(col_idx)}{row_idx + 1}"
+    text = safe_text(value)
+    return {
+        "file": file_kind,
+        "sheet": f"Sheet {sheet_idx + 1}",
+        "row": row_idx + 1,
+        "column": excel_col_name(col_idx),
+        "cell": cell,
+        "field": field,
+        "value": text,
+        "message": f"{file_kind} {cell}（{field}）{reason}" + (f"，当前值：{text}" if text else ""),
+    }
+
+
+def numeric_value_state(value, require_positive=False):
+    text = safe_text(value)
+    if not text:
+        return None, "为空"
+    if text.upper() in EXCEL_ERROR_VALUES or text.startswith("#"):
+        return None, "是 Excel 异常值"
+    try:
+        number = float(str(value).replace(",", "").strip())
+    except (TypeError, ValueError):
+        return None, "不是有效数字"
+    if require_positive and number <= 0:
+        return number, "必须大于 0"
+    return number, ""
+
+
+def text_value_state(value):
+    text = safe_text(value)
+    if not text:
+        return "为空"
+    if text.upper() in EXCEL_ERROR_VALUES or text.startswith("#"):
+        return "是 Excel 异常值"
+    return ""
+
+
+def append_numeric_anomaly(anomalies, file_kind, sheet_idx, row_idx, row, col_idx, field, require_positive=True):
+    if col_idx is None or col_idx >= len(row):
+        anomalies.append(anomaly(file_kind, sheet_idx, row_idx, 0, field, "", "缺少字段列"))
+        return
+    _, reason = numeric_value_state(row[col_idx], require_positive=require_positive)
+    if reason:
+        anomalies.append(anomaly(file_kind, sheet_idx, row_idx, col_idx, field, row[col_idx], reason))
+
+
+def append_text_anomaly(anomalies, file_kind, sheet_idx, row_idx, row, col_idx, field):
+    if col_idx is None or col_idx >= len(row):
+        anomalies.append(anomaly(file_kind, sheet_idx, row_idx, 0, field, "", "缺少字段列"))
+        return
+    reason = text_value_state(row[col_idx])
+    if reason:
+        anomalies.append(anomaly(file_kind, sheet_idx, row_idx, col_idx, field, row[col_idx], reason))
+
+
 def parse_invoice(path):
     sheets = [matrix_from_sheet(s) for s in read_spreadsheet(path)]
     invoice_sheet = None
     header_index = None
-    for sheet in sheets:
+    invoice_sheet_idx = 0
+    for sheet_idx, sheet in enumerate(sheets):
         idx = find_header_row(sheet, [("qad pn", "part no"), ("qty", "quantity"), ("amount",)])
         if idx is not None:
             invoice_sheet = sheet
+            invoice_sheet_idx = sheet_idx
             header_index = idx
             break
     if not invoice_sheet:
@@ -766,13 +840,22 @@ def parse_invoice(path):
                 currency = text
 
     items = []
-    for row in invoice_sheet[header_index + 1:]:
+    anomalies = []
+    for row_idx, row in enumerate(invoice_sheet[header_index + 1:], header_index + 1):
         part = safe_text(row[cols["part"]]) if cols["part"] is not None and cols["part"] < len(row) else ""
         if not part or not re.search(r"\d", part):
             continue
         quantity = to_number(row[cols["quantity"]]) if cols["quantity"] is not None and cols["quantity"] < len(row) else 0
         unit_price = to_number(row[cols["unit_price"]]) if cols["unit_price"] is not None and cols["unit_price"] < len(row) else 0
         amount = to_number(row[cols["amount"]]) if cols["amount"] is not None and cols["amount"] < len(row) else 0
+        is_applied_row = quantity > 0 or amount > 0
+        if is_applied_row:
+            append_text_anomaly(anomalies, "Invoice", invoice_sheet_idx, row_idx, row, cols["part"], "QAD PN")
+            append_text_anomaly(anomalies, "Invoice", invoice_sheet_idx, row_idx, row, cols["imos"], "IMOS P/N")
+            append_numeric_anomaly(anomalies, "Invoice", invoice_sheet_idx, row_idx, row, cols["quantity"], "Quantity", True)
+            append_numeric_anomaly(anomalies, "Invoice", invoice_sheet_idx, row_idx, row, cols["amount"], "Amount", True)
+            append_numeric_anomaly(anomalies, "Invoice", invoice_sheet_idx, row_idx, row, cols["unit_price"], "UP", True)
+            append_text_anomaly(anomalies, "Invoice", invoice_sheet_idx, row_idx, row, cols["currency"], "Currency")
         if amount == 0 and quantity and unit_price:
             amount = quantity * unit_price
         if quantity <= 0 and amount <= 0:
@@ -792,6 +875,8 @@ def parse_invoice(path):
             "hsCode": normalize_hs(row[cols["hs_code"]]) if cols["hs_code"] is not None and cols["hs_code"] < len(row) else "",
             "brand": normalize_brand(row[cols["brand"]]) if cols["brand"] is not None and cols["brand"] < len(row) else "",
             "model": safe_text(row[cols["model"]]) if cols["model"] is not None and cols["model"] < len(row) else "",
+            "sourceRow": row_idx + 1,
+            "sourceSheet": f"Sheet {invoice_sheet_idx + 1}",
         })
 
     return {
@@ -801,6 +886,7 @@ def parse_invoice(path):
         "currency": currency or "USD",
         "exportDateSerial": export_date,
         "items": items,
+        "anomalies": anomalies,
     }
 
 
@@ -810,9 +896,11 @@ def parse_packing(path):
     gross_weight = 0.0
     net_weight = 0.0
     part_weights = {}
+    part_gross_weights = {}
     export_date = excel_serial_from_yyyymmdd(Path(path).name)
+    anomalies = []
 
-    for sheet in sheets:
+    for sheet_idx, sheet in enumerate(sheets):
         header_idx = find_header_row(sheet, [("qad pn", "part no"), ("qty", "quantity"), ("n.w", "nw")])
         if header_idx is None:
             continue
@@ -842,7 +930,7 @@ def parse_packing(path):
         pallets = set()
         summed_net_weight = 0.0
         summed_gross_weight = 0.0
-        for row in sheet[header_idx + 1:]:
+        for row_idx, row in enumerate(sheet[header_idx + 1:], header_idx + 1):
             label = " ".join(safe_text(v).lower() for v in row)
             if "total" in label:
                 package_count = int(to_number(row[pallet_col])) if pallet_col is not None and pallet_col < len(row) else package_count
@@ -860,9 +948,14 @@ def parse_packing(path):
             quantity = to_number(row[qty_col])
             if quantity < 1 or not re.match(r"^\d{9,}-\w+", part):
                 continue
+            append_text_anomaly(anomalies, "Packing list", sheet_idx, row_idx, row, part_col, "QAD PN")
+            append_numeric_anomaly(anomalies, "Packing list", sheet_idx, row_idx, row, qty_col, "Quantity", True)
+            append_numeric_anomaly(anomalies, "Packing list", sheet_idx, row_idx, row, net_col, "N.W.(KG)", True)
+            append_numeric_anomaly(anomalies, "Packing list", sheet_idx, row_idx, row, gross_col, "G.W.(KG)", True)
             item_net_weight = round2(to_number(row[net_col]))
             item_gross_weight = round2(to_number(row[gross_col])) if gross_col < len(row) else 0
             part_weights[normalize_part(part)] = item_net_weight
+            part_gross_weights[normalize_part(part)] = item_gross_weight
             summed_net_weight += item_net_weight
             summed_gross_weight += item_gross_weight
             if pallet_col is not None and pallet_col < len(row):
@@ -899,7 +992,9 @@ def parse_packing(path):
         "grossWeight": round2(gross_weight) if gross_weight else "",
         "netWeight": round2(net_weight) if net_weight else "",
         "partWeights": part_weights,
+        "partGrossWeights": part_gross_weights,
         "exportDateSerial": export_date,
+        "anomalies": anomalies,
     }
 
 
@@ -946,6 +1041,9 @@ def load_rules(path=None):
 
 def merge_preview(invoice, packing, rules):
     warnings = []
+    source_anomalies = []
+    source_anomalies.extend(invoice.get("anomalies", []))
+    source_anomalies.extend(packing.get("anomalies", []))
     if not invoice["items"]:
         warnings.append("Invoice 未解析到商品明细")
     if not packing.get("packageCount"):
@@ -964,6 +1062,7 @@ def merge_preview(invoice, packing, rules):
         merged["goodsName"] = item.get("goodsName") or rule.get("goodsName", "")
         merged["brand"] = normalize_brand(item.get("brand") or rule.get("brand", ""))
         merged["netWeight"] = packing.get("partWeights", {}).get(normalize_part(item["partNo"]), "")
+        merged["grossWeight"] = packing.get("partGrossWeights", {}).get(normalize_part(item["partNo"]), "")
         if not merged["hsCode"] or not merged["goodsName"]:
             missing_rules.append(item["partNo"])
         enriched.append(merged)
@@ -988,11 +1087,13 @@ def merge_preview(invoice, packing, rules):
             "amount": 0.0,
             "netWeight": 0.0,
             "parts": [],
+            "sourceItems": [],
         })
         group["quantity"] += to_number(item["quantity"])
         group["amount"] += to_number(item["amount"])
         group["netWeight"] += to_number(item.get("netWeight"))
         group["parts"].append(item["partNo"])
+        group["sourceItems"].append(item)
 
     commodity_lines = list(groups.values())
     for idx, row in enumerate(commodity_lines, 1):
@@ -1005,6 +1106,29 @@ def merge_preview(invoice, packing, rules):
         total_qty = sum(row["quantity"] for row in commodity_lines) or 1
         for row in commodity_lines:
             row["netWeight"] = round2(float(packing["netWeight"]) * row["quantity"] / total_qty)
+
+    audit_samples = []
+    for row in commodity_lines:
+        for item in row.get("sourceItems", []):
+            audit_samples.append({
+                "itemNo": row["itemNo"],
+                "hsCode": row["hsCode"],
+                "goodsName": row["goodsName"],
+                "brand": row["brand"],
+                "qadPartNo": item.get("partNo", ""),
+                "imosPartNo": item.get("imosPartNo", ""),
+                "quantity": round2(to_number(item.get("quantity"))),
+                "netWeight": round2(to_number(item.get("netWeight"))),
+                "grossWeight": round2(to_number(item.get("grossWeight"))),
+                "unitPrice": round2(to_number(item.get("unitPrice"))),
+                "amount": round2(to_number(item.get("amount"))),
+                "currency": item.get("currency") or invoice["currency"],
+                "poNo": item.get("poNo", ""),
+                "sourceSheet": item.get("sourceSheet", ""),
+                "sourceRow": item.get("sourceRow", ""),
+            })
+    for row in commodity_lines:
+        row.pop("sourceItems", None)
 
     total_quantity = round2(sum(row["quantity"] for row in commodity_lines))
     total_amount = round2(sum(row["amount"] for row in commodity_lines))
@@ -1036,6 +1160,8 @@ def merge_preview(invoice, packing, rules):
             "currency": invoice["currency"],
         },
         "warnings": warnings,
+        "sourceAnomalies": source_anomalies,
+        "auditSamples": audit_samples,
         "generatedAt": now_stamp(),
     }
 
@@ -1080,8 +1206,165 @@ def set_cell(root, ref, value):
         t.text = safe_text(value)
 
 
+def apply_cell_style(root, ref, style_id):
+    if style_id is None:
+        return
+    cell = ensure_cell(root, ref)
+    cell.attrib["s"] = str(style_id)
+
+
+def output_text_is_abnormal(value):
+    reason = text_value_state(value)
+    if reason:
+        return True
+    text = safe_text(value)
+    return text.upper() == "UNKNOWN" or text.startswith("未匹配")
+
+
+def output_number_is_abnormal(value, require_positive=True):
+    _, reason = numeric_value_state(value, require_positive=require_positive)
+    return bool(reason)
+
+
+def flag_text_cell(root, ref, value, style_id):
+    if output_text_is_abnormal(value):
+        apply_cell_style(root, ref, style_id)
+
+
+def flag_number_cell(root, ref, value, style_id, unit_ref=None):
+    if output_number_is_abnormal(value, require_positive=True):
+        apply_cell_style(root, ref, style_id)
+        if unit_ref:
+            apply_cell_style(root, unit_ref, style_id)
+
+
 def clear_cell(root, ref):
     set_cell(root, ref, "")
+
+
+def ensure_red_bold_style(styles_xml):
+    root = ET.fromstring(styles_xml)
+    fonts = root.find(f"{{{NS_MAIN}}}fonts")
+    fills = root.find(f"{{{NS_MAIN}}}fills")
+    borders = root.find(f"{{{NS_MAIN}}}borders")
+    cell_xfs = root.find(f"{{{NS_MAIN}}}cellXfs")
+    if fonts is None or fills is None or borders is None or cell_xfs is None:
+        return None, styles_xml
+
+    font_id = len(list(fonts))
+    font = ET.SubElement(fonts, f"{{{NS_MAIN}}}font")
+    ET.SubElement(font, f"{{{NS_MAIN}}}b")
+    ET.SubElement(font, f"{{{NS_MAIN}}}color", {"rgb": "FFFF0000"})
+    ET.SubElement(font, f"{{{NS_MAIN}}}sz", {"val": "11"})
+    ET.SubElement(font, f"{{{NS_MAIN}}}name", {"val": "Calibri"})
+    fonts.attrib["count"] = str(font_id + 1)
+
+    fill_id = 0
+    border_id = 0
+    style_id = len(list(cell_xfs))
+    ET.SubElement(cell_xfs, f"{{{NS_MAIN}}}xf", {
+        "numFmtId": "0",
+        "fontId": str(font_id),
+        "fillId": str(fill_id),
+        "borderId": str(border_id),
+        "xfId": "0",
+        "applyFont": "1",
+    })
+    cell_xfs.attrib["count"] = str(style_id + 1)
+    return style_id, ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+
+def simple_sheet_xml(rows):
+    worksheet = ET.Element(f"{{{NS_MAIN}}}worksheet")
+    sheet_data = ET.SubElement(worksheet, f"{{{NS_MAIN}}}sheetData")
+    for row_idx, row_values in enumerate(rows, 1):
+        row_el = ET.SubElement(sheet_data, f"{{{NS_MAIN}}}row", {"r": str(row_idx)})
+        for col_idx, value in enumerate(row_values):
+            ref = f"{excel_col_name(col_idx)}{row_idx}"
+            cell = ET.SubElement(row_el, f"{{{NS_MAIN}}}c", {"r": ref})
+            if isinstance(value, (int, float)) and value != "":
+                v = ET.SubElement(cell, f"{{{NS_MAIN}}}v")
+                v.text = str(int(value)) if float(value).is_integer() else str(value)
+            else:
+                cell.attrib["t"] = "inlineStr"
+                is_node = ET.SubElement(cell, f"{{{NS_MAIN}}}is")
+                t = ET.SubElement(is_node, f"{{{NS_MAIN}}}t")
+                t.text = safe_text(value)
+    return ET.tostring(worksheet, encoding="utf-8", xml_declaration=True)
+
+
+def audit_rows(preview):
+    samples = preview.get("auditSamples") or []
+    if not samples:
+        return [["随机抽检"], ["无可抽检数据"]]
+    sample = random.choice(samples)
+    return [
+        ["随机抽检"],
+        ["字段", "值"],
+        ["报关项号", sample.get("itemNo", "")],
+        ["商品编号", sample.get("hsCode", "")],
+        ["商品名称", sample.get("goodsName", "")],
+        ["QAD PN 号", sample.get("qadPartNo", "")],
+        ["IMOS PN 号", sample.get("imosPartNo", "")],
+        ["数量", sample.get("quantity", "")],
+        ["NW(kg)", sample.get("netWeight", "")],
+        ["GW(kg)", sample.get("grossWeight", "")],
+        ["单价", sample.get("unitPrice", "")],
+        ["金额", sample.get("amount", "")],
+        ["币制", sample.get("currency", "")],
+        ["品牌", sample.get("brand", "")],
+        ["PO No.", sample.get("poNo", "")],
+        ["来源表", sample.get("sourceSheet", "")],
+        ["来源行", sample.get("sourceRow", "")],
+    ]
+
+
+def next_sheet_number(sheet_paths):
+    numbers = []
+    for path in sheet_paths:
+        match = re.search(r"sheet(\d+)\.xml$", path)
+        if match:
+            numbers.append(int(match.group(1)))
+    return max(numbers or [0]) + 1
+
+
+def add_audit_sheet(workbook, rels, content_types_root, sheets, modified, preview):
+    sheet_name = "随机抽检"
+    sheet_no = next_sheet_number(sheets.values())
+    sheet_path = f"xl/worksheets/sheet{sheet_no}.xml"
+    rel_target = f"worksheets/sheet{sheet_no}.xml"
+
+    existing_rids = []
+    for rel in rels.findall(f"{{{NS_PACKAGE_REL}}}Relationship"):
+        match = re.match(r"rId(\d+)$", rel.attrib.get("Id", ""))
+        if match:
+            existing_rids.append(int(match.group(1)))
+    rid = f"rId{max(existing_rids or [0]) + 1}"
+    ET.SubElement(rels, f"{{{NS_PACKAGE_REL}}}Relationship", {
+        "Id": rid,
+        "Type": "http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet",
+        "Target": rel_target,
+    })
+
+    sheets_node = workbook.find(f"{{{NS_MAIN}}}sheets")
+    existing_sheet_ids = [int(sheet.attrib.get("sheetId", "0")) for sheet in sheets_node.findall(f"{{{NS_MAIN}}}sheet")]
+    ET.SubElement(sheets_node, f"{{{NS_MAIN}}}sheet", {
+        "name": sheet_name,
+        "sheetId": str(max(existing_sheet_ids or [0]) + 1),
+        f"{{{NS_REL}}}id": rid,
+    })
+
+    override_exists = any(
+        item.attrib.get("PartName") == f"/{sheet_path}"
+        for item in content_types_root.findall(f"{{{NS_CONTENT_TYPES}}}Override")
+    )
+    if not override_exists:
+        ET.SubElement(content_types_root, f"{{{NS_CONTENT_TYPES}}}Override", {
+            "PartName": f"/{sheet_path}",
+            "ContentType": "application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml",
+        })
+
+    modified[sheet_path] = simple_sheet_xml(audit_rows(preview))
 
 
 def generate_workbook(preview):
@@ -1095,6 +1378,11 @@ def generate_workbook(preview):
     with zipfile.ZipFile(template, "r") as zin:
         workbook = ET.fromstring(zin.read("xl/workbook.xml"))
         rels = ET.fromstring(zin.read("xl/_rels/workbook.xml.rels"))
+        content_types = ET.fromstring(zin.read("[Content_Types].xml"))
+        red_style_id = None
+        styles_xml = None
+        if "xl/styles.xml" in zin.namelist():
+            red_style_id, styles_xml = ensure_red_bold_style(zin.read("xl/styles.xml"))
         rel_map = {rel.attrib["Id"]: rel.attrib["Target"] for rel in rels}
         sheets = {}
         for sheet in workbook.findall(f"{{{NS_MAIN}}}sheets/{{{NS_MAIN}}}sheet"):
@@ -1122,6 +1410,9 @@ def generate_workbook(preview):
         }
         for ref, value in values.items():
             set_cell(main_root, ref, value)
+        flag_number_cell(main_root, "E12", preview["packageCount"], red_style_id)
+        flag_number_cell(main_root, "F12", preview["grossWeight"], red_style_id)
+        flag_number_cell(main_root, "G12", preview["netWeight"], red_style_id)
 
         for row in range(18, 75):
             for col in ("A", "B", "D", "G", "H", "J", "K", "L", "M", "O", "R"):
@@ -1142,6 +1433,12 @@ def generate_workbook(preview):
             set_cell(main_root, f"B{row_num + 1}", line["brand"])
             set_cell(main_root, f"G{row_num + 1}", line["netWeight"])
             set_cell(main_root, f"H{row_num + 1}", "千克")
+            flag_text_cell(main_root, f"B{row_num}", line["hsCode"], red_style_id)
+            flag_text_cell(main_root, f"D{row_num}", line["goodsName"], red_style_id)
+            flag_number_cell(main_root, f"G{row_num}", line["quantity"], red_style_id, f"H{row_num}")
+            flag_number_cell(main_root, f"J{row_num}", line["amount"], red_style_id)
+            flag_text_cell(main_root, f"K{row_num}", line["currency"], red_style_id)
+            flag_number_cell(main_root, f"G{row_num + 1}", line["netWeight"], red_style_id, f"H{row_num + 1}")
 
         set_cell(main_root, "A75", "Sub Total")
         set_cell(main_root, "G75", preview["totals"]["quantity"])
@@ -1150,8 +1447,14 @@ def generate_workbook(preview):
         set_cell(main_root, "K75", preview["totals"]["currency"])
         set_cell(main_root, "G76", preview["netWeight"])
         set_cell(main_root, "H76", "千克")
+        flag_number_cell(main_root, "G75", preview["totals"]["quantity"], red_style_id, "H75")
+        flag_number_cell(main_root, "J75", preview["totals"]["amount"], red_style_id)
+        flag_text_cell(main_root, "K75", preview["totals"]["currency"], red_style_id)
+        flag_number_cell(main_root, "G76", preview["netWeight"], red_style_id, "H76")
 
         modified = {main_path: ET.tostring(main_root, encoding="utf-8", xml_declaration=True)}
+        if styles_xml is not None:
+            modified["xl/styles.xml"] = styles_xml
 
         if "申报要素" in sheets:
             decl_path = sheets["申报要素"]
@@ -1173,12 +1476,22 @@ def generate_workbook(preview):
                 cursor += 8
             modified[decl_path] = ET.tostring(decl_root, encoding="utf-8", xml_declaration=True)
 
+        add_audit_sheet(workbook, rels, content_types, sheets, modified, preview)
+        modified["xl/workbook.xml"] = ET.tostring(workbook, encoding="utf-8", xml_declaration=True)
+        modified["xl/_rels/workbook.xml.rels"] = ET.tostring(rels, encoding="utf-8", xml_declaration=True)
+        modified["[Content_Types].xml"] = ET.tostring(content_types, encoding="utf-8", xml_declaration=True)
+
         with zipfile.ZipFile(output_path, "w", zipfile.ZIP_DEFLATED) as zout:
+            written = set()
             for info in zin.infolist():
                 data = modified.get(info.filename)
                 if data is None:
                     data = zin.read(info.filename)
                 zout.writestr(info, data)
+                written.add(info.filename)
+            for filename, data in modified.items():
+                if filename not in written:
+                    zout.writestr(filename, data)
 
     return output_path, output_name
 
