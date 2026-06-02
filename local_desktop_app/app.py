@@ -1117,15 +1117,15 @@ def merge_preview(invoice, packing, rules):
                 "brand": row["brand"],
                 "qadPartNo": item.get("partNo", ""),
                 "imosPartNo": item.get("imosPartNo", ""),
-                "quantity": round2(to_number(item.get("quantity"))),
-                "netWeight": round2(to_number(item.get("netWeight"))),
-                "grossWeight": round2(to_number(item.get("grossWeight"))),
+                "invoiceQuantity": round2(to_number(item.get("quantity"))),
+                "packingNetWeight": round2(to_number(item.get("netWeight"))),
+                "packingGrossWeight": round2(to_number(item.get("grossWeight"))),
                 "unitPrice": round2(to_number(item.get("unitPrice"))),
-                "amount": round2(to_number(item.get("amount"))),
+                "invoiceAmount": round2(to_number(item.get("amount"))),
                 "currency": item.get("currency") or invoice["currency"],
                 "poNo": item.get("poNo", ""),
-                "sourceSheet": item.get("sourceSheet", ""),
-                "sourceRow": item.get("sourceRow", ""),
+                "invoiceSourceSheet": item.get("sourceSheet", ""),
+                "invoiceSourceRow": item.get("sourceRow", ""),
             })
     for row in commodity_lines:
         row.pop("sourceItems", None)
@@ -1276,6 +1276,23 @@ def ensure_red_bold_style(styles_xml):
 
 def simple_sheet_xml(rows):
     worksheet = ET.Element(f"{{{NS_MAIN}}}worksheet")
+    cols = ET.SubElement(worksheet, f"{{{NS_MAIN}}}cols")
+    widths = [12, 16, 28, 18, 18, 14, 14, 14, 10, 15, 15, 16, 18]
+    for idx, width in enumerate(widths, 1):
+        ET.SubElement(cols, f"{{{NS_MAIN}}}col", {
+            "min": str(idx),
+            "max": str(idx),
+            "width": str(width),
+            "customWidth": "1",
+        })
+    sheet_views = ET.SubElement(worksheet, f"{{{NS_MAIN}}}sheetViews")
+    sheet_view = ET.SubElement(sheet_views, f"{{{NS_MAIN}}}sheetView", {"workbookViewId": "0"})
+    ET.SubElement(sheet_view, f"{{{NS_MAIN}}}pane", {
+        "ySplit": "5",
+        "topLeftCell": "A6",
+        "activePane": "bottomLeft",
+        "state": "frozen",
+    })
     sheet_data = ET.SubElement(worksheet, f"{{{NS_MAIN}}}sheetData")
     for row_idx, row_values in enumerate(rows, 1):
         row_el = ET.SubElement(sheet_data, f"{{{NS_MAIN}}}row", {"r": str(row_idx)})
@@ -1297,26 +1314,76 @@ def audit_rows(preview):
     samples = preview.get("auditSamples") or []
     if not samples:
         return [["随机抽检"], ["无可抽检数据"]]
-    sample = random.choice(samples)
-    return [
+    item_nos = sorted({sample.get("itemNo") for sample in samples if sample.get("itemNo")})
+    selected_item_no = random.choice(item_nos) if item_nos else samples[0].get("itemNo", "")
+    selected = [sample for sample in samples if sample.get("itemNo") == selected_item_no] or [random.choice(samples)]
+    first = selected[0]
+    rows = [
         ["随机抽检"],
-        ["字段", "值"],
-        ["报关项号", sample.get("itemNo", "")],
-        ["商品编号", sample.get("hsCode", "")],
-        ["商品名称", sample.get("goodsName", "")],
-        ["QAD PN 号", sample.get("qadPartNo", "")],
-        ["IMOS PN 号", sample.get("imosPartNo", "")],
-        ["数量", sample.get("quantity", "")],
-        ["NW(kg)", sample.get("netWeight", "")],
-        ["GW(kg)", sample.get("grossWeight", "")],
-        ["单价", sample.get("unitPrice", "")],
-        ["金额", sample.get("amount", "")],
-        ["币制", sample.get("currency", "")],
-        ["品牌", sample.get("brand", "")],
-        ["PO No.", sample.get("poNo", "")],
-        ["来源表", sample.get("sourceSheet", "")],
-        ["来源行", sample.get("sourceRow", "")],
+        ["抽检方式", "随机抽取一个报关商品编号，并按 QAD PN 展示输入文件中的逐行数据，供客户回查 Invoice 和 Packing list"],
+        ["报关项号", first.get("itemNo", ""), "商品编号", first.get("hsCode", ""), "商品名称", first.get("goodsName", "")],
+        [],
+        [
+            "报关项号",
+            "商品编号",
+            "商品名称",
+            "QAD PN",
+            "IMOS PN",
+            "Invoice 数量",
+            "Invoice 单价",
+            "Invoice 金额",
+            "币制",
+            "Packing NW(kg)",
+            "Packing GW(kg)",
+            "PO No.",
+            "Invoice 来源行",
+        ],
     ]
+    total_quantity = 0.0
+    total_amount = 0.0
+    total_net_weight = 0.0
+    total_gross_weight = 0.0
+    for sample in selected:
+        quantity = round2(to_number(sample.get("invoiceQuantity")))
+        amount = round2(to_number(sample.get("invoiceAmount")))
+        net_weight = round2(to_number(sample.get("packingNetWeight")))
+        gross_weight = round2(to_number(sample.get("packingGrossWeight")))
+        total_quantity += quantity
+        total_amount += amount
+        total_net_weight += net_weight
+        total_gross_weight += gross_weight
+        rows.append([
+            sample.get("itemNo", ""),
+            sample.get("hsCode", ""),
+            sample.get("goodsName", ""),
+            sample.get("qadPartNo", ""),
+            sample.get("imosPartNo", ""),
+            quantity,
+            sample.get("unitPrice", ""),
+            amount,
+            sample.get("currency", ""),
+            net_weight,
+            gross_weight,
+            sample.get("poNo", ""),
+            f"{sample.get('invoiceSourceSheet', '')} 第{sample.get('invoiceSourceRow', '')}行",
+        ])
+    rows.append([])
+    rows.append([
+        "本抽检组加总",
+        "",
+        "",
+        "",
+        "",
+        round2(total_quantity),
+        "",
+        round2(total_amount),
+        first.get("currency", ""),
+        round2(total_net_weight),
+        round2(total_gross_weight),
+        "",
+        "",
+    ])
+    return rows
 
 
 def next_sheet_number(sheet_paths):
