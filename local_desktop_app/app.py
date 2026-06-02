@@ -674,46 +674,75 @@ def row_contains(row, *terms):
     return all(term.lower() in text for term in terms)
 
 
+def normalized_header(row):
+    return [safe_text(v).lower().replace(" ", "").replace("_", "") for v in row]
+
+
+def find_header_row(rows, required_any_groups):
+    for idx, row in enumerate(rows):
+        text = " ".join(safe_text(v).lower() for v in row)
+        compact = text.replace(" ", "").replace("_", "")
+        matched = True
+        for group in required_any_groups:
+            if not any(term.lower().replace(" ", "").replace("_", "") in compact for term in group):
+                matched = False
+                break
+        if matched:
+            return idx
+    return None
+
+
 def parse_invoice(path):
     sheets = [matrix_from_sheet(s) for s in read_spreadsheet(path)]
     invoice_sheet = None
     header_index = None
     for sheet in sheets:
-        for idx, row in enumerate(sheet):
-            if row_contains(row, "qad pn") and row_contains(row, "qty"):
-                invoice_sheet = sheet
-                header_index = idx
-                break
-        if invoice_sheet:
+        idx = find_header_row(sheet, [("qad pn", "part no"), ("qty", "quantity"), ("amount",)])
+        if idx is not None:
+            invoice_sheet = sheet
+            header_index = idx
             break
     if not invoice_sheet:
-        raise ValueError("Invoice 中没有找到包含 QAD PN 和 qty. 的明细表")
+        raise ValueError("Invoice 中没有找到包含 QAD PN 和 Quantity/Qty 的明细表")
 
-    header = [safe_text(v).lower() for v in invoice_sheet[header_index]]
+    header = normalized_header(invoice_sheet[header_index])
 
     def find_col(*names):
-        for name in names:
+        normalized_names = [name.lower().replace(" ", "").replace("_", "") for name in names]
+        for name in normalized_names:
             for idx, value in enumerate(header):
+                if name == value:
+                    return idx
+        for name in normalized_names:
+            for idx, value in enumerate(header):
+                if name in value:
+                    return idx
+        return None
+
+    def find_raw_col(*names):
+        raw_header = [safe_text(v).lower() for v in invoice_sheet[header_index]]
+        for name in names:
+            for idx, value in enumerate(raw_header):
                 if name.lower() == value:
                     return idx
-            for idx, value in enumerate(header):
+            for idx, value in enumerate(raw_header):
                 if name.lower() in value:
                     return idx
         return None
 
     cols = {
         "part": find_col("qad pn", "part no"),
-        "imos": find_col("imos p/n"),
+        "imos": find_col("imos p/n", "imos pn"),
         "description_en": find_col("description"),
-        "quantity": find_col("qty"),
+        "quantity": find_col("qty", "quantity"),
         "unit_price": find_col("up"),
         "po": find_col("po_no"),
         "amount": find_col("amount"),
         "currency": find_col("currency"),
-        "goods_name": find_col("description"),
-        "hs_code": find_col("hs code"),
-        "brand": find_col("品牌"),
-        "model": find_col("车型"),
+        "goods_name": find_raw_col("商品名称", "货物名称", "goods name"),
+        "hs_code": find_col("hs code", "hscode", "商品编号"),
+        "brand": find_raw_col("品牌", "brand"),
+        "model": find_raw_col("车型", "model"),
     }
     description_cols = [i for i, value in enumerate(header) if "description" in value]
     if len(description_cols) > 1:
@@ -784,37 +813,45 @@ def parse_packing(path):
     export_date = excel_serial_from_yyyymmdd(Path(path).name)
 
     for sheet in sheets:
-        header_idx = None
-        for idx, row in enumerate(sheet):
-            if row_contains(row, "qad pn") and row_contains(row, "n.w"):
-                header_idx = idx
-                break
+        header_idx = find_header_row(sheet, [("qad pn", "part no"), ("qty", "quantity"), ("n.w", "nw")])
         if header_idx is None:
             continue
-        header = [safe_text(v).lower() for v in sheet[header_idx]]
+        header = normalized_header(sheet[header_idx])
 
         def find_col(*terms):
+            normalized_terms = [term.lower().replace(" ", "").replace("_", "") for term in terms]
             for term in terms:
+                normalized_term = term.lower().replace(" ", "").replace("_", "")
+                for col, value in enumerate(header):
+                    if value == normalized_term:
+                        return col
+            for term in normalized_terms:
                 for col, value in enumerate(header):
                     if term in value:
                         return col
             return None
 
         part_col = find_col("qad pn")
-        qty_col = find_col("qty")
-        net_col = find_col("n.w")
-        gross_col = find_col("g.w")
+        qty_col = find_col("qty", "quantity")
+        net_col = find_col("n.w.(kg)", "n.w", "nw")
+        gross_col = find_col("g.w.(kg)", "g.w", "gw")
         pallet_col = find_col("pallet")
         if part_col is None or qty_col is None or net_col is None or gross_col is None:
             continue
 
         pallets = set()
+        summed_net_weight = 0.0
+        summed_gross_weight = 0.0
         for row in sheet[header_idx + 1:]:
             label = " ".join(safe_text(v).lower() for v in row)
             if "total" in label:
                 package_count = int(to_number(row[pallet_col])) if pallet_col is not None and pallet_col < len(row) else package_count
-                net_weight = round2(to_number(row[net_col])) if net_col < len(row) else net_weight
-                gross_weight = round2(to_number(row[gross_col])) if gross_col < len(row) else gross_weight
+                total_net = to_number(row[net_col]) if net_col < len(row) else 0
+                total_gross = to_number(row[gross_col]) if gross_col < len(row) else 0
+                if total_net:
+                    net_weight = round2(total_net)
+                if total_gross:
+                    gross_weight = round2(total_gross)
                 continue
 
             if max(part_col, qty_col, net_col) >= len(row):
@@ -823,13 +860,21 @@ def parse_packing(path):
             quantity = to_number(row[qty_col])
             if quantity < 1 or not re.match(r"^\d{9,}-\w+", part):
                 continue
-            part_weights[normalize_part(part)] = round2(to_number(row[net_col]))
+            item_net_weight = round2(to_number(row[net_col]))
+            item_gross_weight = round2(to_number(row[gross_col])) if gross_col < len(row) else 0
+            part_weights[normalize_part(part)] = item_net_weight
+            summed_net_weight += item_net_weight
+            summed_gross_weight += item_gross_weight
             if pallet_col is not None and pallet_col < len(row):
                 for number in re.findall(r"\d+", safe_text(row[pallet_col])):
                     pallets.add(int(number))
 
         if not package_count and pallets:
             package_count = max(pallets)
+        if not net_weight and summed_net_weight:
+            net_weight = round2(summed_net_weight)
+        if not gross_weight and summed_gross_weight:
+            gross_weight = round2(summed_gross_weight)
         if part_weights:
             break
 
@@ -869,14 +914,18 @@ def load_rules(path=None):
             rows = book.rows(sheet_name)
             if not rows:
                 continue
-            header = [safe_text(v).lower() for v in rows[0]]
+            header_idx = find_header_row(rows, [("qad pn", "part", "pn"), ("hs code", "商品编号")])
+            if header_idx is None:
+                continue
+            header = [safe_text(v).lower() for v in rows[header_idx]]
+            compact_header = normalized_header(rows[header_idx])
             part_cols = [i for i, v in enumerate(header) if "part" in v or "pn" in v]
-            hs_col = next((i for i, v in enumerate(header) if "hs" in v and "code" in v), None)
-            desc_col = next((i for i, v in enumerate(header) if "description" in v or "货物名称" in v), None)
-            brand_col = next((i for i, v in enumerate(header) if "品牌" in v), None)
+            hs_col = next((i for i, v in enumerate(compact_header) if ("hs" in v and "code" in v) or "商品编号" in header[i]), None)
+            desc_col = next((i for i, v in enumerate(header) if "description" in v or "货物名称" in v or "商品名称" in v), None)
+            brand_col = next((i for i, v in enumerate(header) if "品牌" in v or "brand" in v), None)
             if not part_cols or hs_col is None:
                 continue
-            for row in rows[1:]:
+            for row in rows[header_idx + 1:]:
                 for part_col in part_cols:
                     if part_col >= len(row):
                         continue
@@ -1039,7 +1088,7 @@ def generate_workbook(preview):
     template = active_template_path()
     if not template.exists():
         raise ValueError("未找到报关单模板，请先在管理员页面上传模板")
-    OUTPUT_DIR.mkdir(exist_ok=True)
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     output_name = f"报关单 IMOS {preview['contractNo']}.xlsx"
     output_path = OUTPUT_DIR / f"{uuid.uuid4().hex}-{output_name}"
 
