@@ -1173,7 +1173,16 @@ def ensure_cell(sheet_data, ref):
     row = sheet_data.find(f".//{{{NS_MAIN}}}row[@r='{row_num}']")
     if row is None:
         sheet_data_parent = sheet_data.find(f"{{{NS_MAIN}}}sheetData")
-        row = ET.SubElement(sheet_data_parent, f"{{{NS_MAIN}}}row", {"r": str(row_num)})
+        row = ET.Element(f"{{{NS_MAIN}}}row", {"r": str(row_num)})
+        inserted = False
+        for idx, child in enumerate(list(sheet_data_parent)):
+            existing_row = int(child.attrib.get("r", "0") or "0")
+            if existing_row > row_num:
+                sheet_data_parent.insert(idx, row)
+                inserted = True
+                break
+        if not inserted:
+            sheet_data_parent.append(row)
     cell = row.find(f"{{{NS_MAIN}}}c[@r='{ref}']")
     if cell is None:
         cell = ET.Element(f"{{{NS_MAIN}}}c", {"r": ref})
@@ -1276,6 +1285,27 @@ def ensure_red_bold_style(styles_xml):
 
 def simple_sheet_xml(rows):
     worksheet = ET.Element(f"{{{NS_MAIN}}}worksheet")
+    max_cols = max((len(row) for row in rows), default=1)
+    max_rows = max(len(rows), 1)
+    ET.SubElement(worksheet, f"{{{NS_MAIN}}}dimension", {
+        "ref": f"A1:{excel_col_name(max_cols - 1)}{max_rows}",
+    })
+    sheet_views = ET.SubElement(worksheet, f"{{{NS_MAIN}}}sheetViews")
+    sheet_view = ET.SubElement(sheet_views, f"{{{NS_MAIN}}}sheetView", {"workbookViewId": "0"})
+    ET.SubElement(sheet_view, f"{{{NS_MAIN}}}pane", {
+        "ySplit": "5",
+        "topLeftCell": "A6",
+        "activePane": "bottomLeft",
+        "state": "frozen",
+    })
+    ET.SubElement(sheet_view, f"{{{NS_MAIN}}}selection", {
+        "pane": "bottomLeft",
+        "activeCell": "A6",
+        "sqref": "A6",
+    })
+    ET.SubElement(worksheet, f"{{{NS_MAIN}}}sheetFormatPr", {
+        "defaultRowHeight": "15",
+    })
     cols = ET.SubElement(worksheet, f"{{{NS_MAIN}}}cols")
     widths = [12, 16, 28, 18, 18, 14, 14, 14, 10, 15, 15, 16, 18]
     for idx, width in enumerate(widths, 1):
@@ -1285,14 +1315,6 @@ def simple_sheet_xml(rows):
             "width": str(width),
             "customWidth": "1",
         })
-    sheet_views = ET.SubElement(worksheet, f"{{{NS_MAIN}}}sheetViews")
-    sheet_view = ET.SubElement(sheet_views, f"{{{NS_MAIN}}}sheetView", {"workbookViewId": "0"})
-    ET.SubElement(sheet_view, f"{{{NS_MAIN}}}pane", {
-        "ySplit": "5",
-        "topLeftCell": "A6",
-        "activePane": "bottomLeft",
-        "state": "frozen",
-    })
     sheet_data = ET.SubElement(worksheet, f"{{{NS_MAIN}}}sheetData")
     for row_idx, row_values in enumerate(rows, 1):
         row_el = ET.SubElement(sheet_data, f"{{{NS_MAIN}}}row", {"r": str(row_idx)})
@@ -1397,6 +1419,10 @@ def next_sheet_number(sheet_paths):
 
 def add_audit_sheet(workbook, rels, content_types_root, sheets, modified, preview):
     sheet_name = "随机抽检"
+    if sheet_name in sheets:
+        modified[sheets[sheet_name]] = simple_sheet_xml(audit_rows(preview))
+        return
+
     sheet_no = next_sheet_number(sheets.values())
     sheet_path = f"xl/worksheets/sheet{sheet_no}.xml"
     rel_target = f"worksheets/sheet{sheet_no}.xml"

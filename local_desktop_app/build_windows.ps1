@@ -6,6 +6,8 @@ pyinstaller `
   --name "IMOS报关单生成" `
   --windowed `
   --onefile `
+  --clean `
+  --collect-all webview `
   --add-data "static;static" `
   --add-data "报关单 IMOS 空白模板.xlsx;." `
   --add-data "2026+Daily+Export+List.xlsx;." `
