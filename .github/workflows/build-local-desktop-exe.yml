@@ -25,6 +25,16 @@ jobs:
         shell: pwsh
         run: .\build_windows.ps1
 
+      - name: Smoke test packaged exe
+        working-directory: local_desktop_app
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem -Path .\dist -Filter "*.exe" | Select-Object -First 1
+          if (-not $exe) {
+            throw "No exe was built"
+          }
+          & $exe.FullName --self-test
+
       - name: Upload exe
         uses: actions/upload-artifact@v4
         with:
