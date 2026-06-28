@@ -93,13 +93,6 @@ def self_test():
             missing = required - names
             if missing:
                 raise RuntimeError("生成的 xlsx 缺少必要文件: " + ", ".join(sorted(missing)))
-            workbook_xml = ET.fromstring(workbook.read("xl/workbook.xml"))
-            sheet_names = [
-                item.attrib.get("name")
-                for item in workbook_xml.findall(f"{{{app.NS_MAIN}}}sheets/{{{app.NS_MAIN}}}sheet")
-            ]
-            if "随机抽检" not in sheet_names:
-                raise RuntimeError("生成的 xlsx 缺少随机抽检 sheet")
             for name in workbook.namelist():
                 if name.endswith(".xml"):
                     ET.fromstring(workbook.read(name))

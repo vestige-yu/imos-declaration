@@ -1761,9 +1761,6 @@ def generate_workbook(preview):
         rels = ET.fromstring(zin.read("xl/_rels/workbook.xml.rels"))
         content_types = ET.fromstring(zin.read("[Content_Types].xml"))
         red_style_id = None
-        styles_xml = None
-        if "xl/styles.xml" in zin.namelist():
-            red_style_id, styles_xml = ensure_red_bold_style(zin.read("xl/styles.xml"))
         rel_map = {rel.attrib["Id"]: rel.attrib["Target"] for rel in rels}
         sheets = {}
         for sheet in workbook.findall(f"{{{NS_MAIN}}}sheets/{{{NS_MAIN}}}sheet"):
@@ -1840,9 +1837,6 @@ def generate_workbook(preview):
         flag_number_cell(main_root, "G76", preview["netWeight"], red_style_id, "H76")
 
         modified = {main_path: ET.tostring(main_root, encoding="utf-8", xml_declaration=True)}
-        if styles_xml is not None:
-            modified["xl/styles.xml"] = styles_xml
-
         if "申报要素" in sheets:
             decl_path = sheets["申报要素"]
             decl_root = ET.fromstring(zin.read(decl_path))
@@ -1863,7 +1857,6 @@ def generate_workbook(preview):
                 cursor += 8
             modified[decl_path] = ET.tostring(decl_root, encoding="utf-8", xml_declaration=True)
 
-        add_audit_sheet(workbook, rels, content_types, sheets, modified, preview)
         remove_calc_chain(rels, content_types)
         normalize_workbook_open_state(workbook)
         modified["xl/workbook.xml"] = ET.tostring(workbook, encoding="utf-8", xml_declaration=True)
