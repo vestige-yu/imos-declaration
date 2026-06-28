@@ -177,12 +177,6 @@ uploadForm.addEventListener("submit", async event => {
     const response = await fetch("/api/parse", { method: "POST", body: new FormData(uploadForm) });
     const data = await response.json();
     if (!data.ok) throw new Error(data.error || "解析失败");
-    if (data.preview?.sourceAnomalies?.length && !confirm(sourceAnomalyText(data.preview.sourceAnomalies))) {
-      await deleteHistorySilently(data.historyId);
-      statusEl.textContent = "已取消";
-      loadHistory();
-      return;
-    }
     currentSession = data.sessionId;
     currentHistoryId = data.historyId;
     currentPreview = data.preview;
@@ -206,7 +200,11 @@ generateBtn.addEventListener("click", async () => {
     });
     const data = await response.json();
     if (!data.ok) throw new Error(data.error || "生成失败");
-    statusEl.textContent = "已生成";
+    statusEl.innerHTML = `
+      已生成。
+      <a href="${escapeHtml(data.downloadUrl)}">手动下载</a>
+      ${data.savedPath ? `<span> 本机已保存：${escapeHtml(data.savedPath)}</span>` : ""}
+    `;
     currentHistoryId = data.historyId || currentHistoryId;
     loadHistory();
     window.location.href = data.downloadUrl;

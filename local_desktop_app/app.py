@@ -14,6 +14,7 @@ import tempfile
 import sys
 import threading
 import time
+import traceback
 import urllib.parse
 import uuid
 import webbrowser
@@ -274,6 +275,16 @@ def validate_xlsx_file(path):
         raise ValueError("生成文件不是有效的 Excel 工作簿") from exc
     except ET.ParseError as exc:
         raise ValueError("生成文件内部结构异常") from exc
+
+
+def log_runtime_error(message):
+    try:
+        ensure_app_dirs()
+        log_path = DATA_DIR / "error.log"
+        with log_path.open("a", encoding="utf-8") as handle:
+            handle.write(f"[{now_stamp()}] {message.rstrip()}\n\n")
+    except Exception:
+        pass
 
 
 def safe_text(value):
@@ -2012,6 +2023,7 @@ class AppHandler(BaseHTTPRequestHandler):
             else:
                 self.send_error(HTTPStatus.NOT_FOUND, "Not found")
         except Exception as exc:
+            log_runtime_error("POST failed:\n" + traceback.format_exc())
             json_response(self, 400, {"ok": False, "error": str(exc)})
 
     def do_DELETE(self):
@@ -2023,6 +2035,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 return
             self.send_error(HTTPStatus.NOT_FOUND, "Not found")
         except Exception as exc:
+            log_runtime_error("DELETE failed:\n" + traceback.format_exc())
             json_response(self, 400, {"ok": False, "error": str(exc)})
 
     def redirect(self, target):
@@ -2132,6 +2145,7 @@ class AppHandler(BaseHTTPRequestHandler):
             "downloadUrl": f"/download/{token}",
             "filename": filename,
             "historyId": history_id,
+            "savedPath": str(path),
         })
 
     def handle_admin_rules(self):
