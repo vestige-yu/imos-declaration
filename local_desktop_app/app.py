@@ -883,7 +883,6 @@ def parse_invoice(path):
         currency = item_currency or currency
         items.append({
             "partNo": part,
-            "imosPartNo": part,
             "descriptionEn": safe_text(row[cols["description_en"]]) if cols["description_en"] is not None and cols["description_en"] < len(row) else "",
             "quantity": quantity,
             "unitPrice": unit_price,
