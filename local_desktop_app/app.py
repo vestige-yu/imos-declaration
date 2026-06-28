@@ -534,6 +534,90 @@ def extract_party_after_label(sheet, label_pattern, max_rows=30):
     return ""
 
 
+def extract_block_after_label(sheet, label_pattern, max_rows=30, block_rows=6):
+    values = []
+    stop_patterns = (
+        r"bill\s*to", r"ship\s*to", r"payment", r"delivery\s*term",
+        r"delivery\s*way", r"customer\s*code", r"serial\s*no",
+    )
+    for row_idx, row in enumerate(sheet[:max_rows]):
+        for col_idx, value in enumerate(row):
+            if not re.search(label_pattern, safe_text(value), re.I):
+                continue
+            for offset, current_row in enumerate(sheet[row_idx:min(len(sheet), row_idx + block_rows + 1)]):
+                if offset:
+                    row_text = " ".join(safe_text(v) for v in current_row)
+                    if any(re.search(pattern, row_text, re.I) for pattern in stop_patterns):
+                        break
+                start_col = col_idx + 1 if offset == 0 else col_idx
+                for idx in range(start_col, len(current_row)):
+                    text = safe_text(current_row[idx])
+                    if text:
+                        values.append(text)
+            return values
+    return values
+
+
+COUNTRY_ALIASES = [
+    ("UNITED STATES OF AMERICA", "美国"),
+    ("UNITED STATES", "美国"),
+    ("U.S.A", "美国"),
+    ("USA", "美国"),
+    ("AMERICA", "美国"),
+    ("VIET NAM", "越南"),
+    ("VIETNAM", "越南"),
+    ("ITALIA", "意大利"),
+    ("ITALY", "意大利"),
+    ("CHINA", "中国"),
+    ("GERMANY", "德国"),
+    ("DEUTSCHLAND", "德国"),
+    ("FRANCE", "法国"),
+    ("UNITED KINGDOM", "英国"),
+    ("GREAT BRITAIN", "英国"),
+    ("BRITAIN", "英国"),
+    ("UK", "英国"),
+    ("SPAIN", "西班牙"),
+    ("POLAND", "波兰"),
+    ("MEXICO", "墨西哥"),
+    ("INDIA", "印度"),
+    ("JAPAN", "日本"),
+    ("KOREA", "韩国"),
+    ("SOUTH KOREA", "韩国"),
+    ("THAILAND", "泰国"),
+    ("MALAYSIA", "马来西亚"),
+    ("INDONESIA", "印度尼西亚"),
+    ("TURKEY", "土耳其"),
+    ("BRAZIL", "巴西"),
+    ("CANADA", "加拿大"),
+    ("AUSTRALIA", "澳大利亚"),
+    ("NETHERLANDS", "荷兰"),
+    ("HOLLAND", "荷兰"),
+    ("BELGIUM", "比利时"),
+    ("SWEDEN", "瑞典"),
+    ("CZECH", "捷克"),
+]
+
+
+def infer_country_from_text(context, rules, allow_china=True):
+    text = safe_text(context)
+    if not text:
+        return ""
+    lowered = text.lower()
+    for raw, standard in rules.get("__standardization", {}).get("国家/地区", []):
+        if not allow_china and safe_text(standard) == "中国":
+            continue
+        raw_text = safe_text(raw).lower()
+        if raw_text and raw_text in lowered:
+            return safe_text(standard)
+    upper = text.upper()
+    for alias, standard in COUNTRY_ALIASES:
+        if not allow_china and standard == "中国":
+            continue
+        if re.search(rf"\b{re.escape(alias)}\b", upper):
+            return standard
+    return ""
+
+
 class XlsWorkbook:
     """Small BIFF8 reader for the old .xls files used by this workflow."""
 
@@ -1118,6 +1202,8 @@ def parse_invoice(path):
         or extract_party_after_label(invoice_sheet, r"bill\s*to")
         or consignee
     )
+    bill_to_context = "\n".join(extract_block_after_label(invoice_sheet, r"bill\s*to"))
+    ship_to_context = "\n".join(extract_block_after_label(invoice_sheet, r"ship\s*to"))
 
     items = []
     anomalies = []
@@ -1160,6 +1246,8 @@ def parse_invoice(path):
     return {
         "contractNo": contract or normalize_document_no(Path(path).stem) or Path(path).stem.split()[0],
         "consignee": consignee or "CASCO Imos Italia S.R.L.",
+        "billToContext": bill_to_context,
+        "shipToContext": ship_to_context,
         "countryContext": "\n".join(
             safe_text(value)
             for row in invoice_sheet[:30]
@@ -1387,20 +1475,19 @@ def load_rules(path=None):
     return rules
 
 
+def infer_trade_country(invoice, rules):
+    return (
+        infer_country_from_text(invoice.get("billToContext", ""), rules, allow_china=False)
+        or infer_country_from_text(invoice.get("countryContext", ""), rules, allow_china=False)
+    )
+
+
 def infer_destination_country(invoice, rules):
-    entries = rules.get("__standardization", {}).get("国家/地区", [])
-    contexts = [invoice.get("consignee", ""), invoice.get("countryContext", "")]
-    for context in contexts:
-        lowered = safe_text(context).lower()
-        if not lowered:
-            continue
-        for raw, standard in entries:
-            if safe_text(standard) == "中国":
-                continue
-            raw_text = safe_text(raw).lower()
-            if raw_text and raw_text in lowered:
-                return standard
-    return ""
+    return (
+        infer_country_from_text(invoice.get("shipToContext", ""), rules, allow_china=False)
+        or infer_country_from_text(invoice.get("consignee", ""), rules, allow_china=False)
+        or infer_trade_country(invoice, rules)
+    )
 
 
 def merge_preview(invoice, packing, rules):
@@ -1434,9 +1521,14 @@ def merge_preview(invoice, packing, rules):
     if missing_rules:
         warnings.append("以下 Part No. 未完整匹配到 HS/商品名称规则：" + "、".join(missing_rules[:20]))
 
+    trade_country = infer_trade_country(invoice, rules)
     destination_country = infer_destination_country(invoice, rules)
+    if not trade_country and destination_country:
+        trade_country = destination_country
     if not destination_country:
-        warnings.append("未能根据客户/地址和值标准化表推断贸易国/运抵国/最终目的国，相关字段将留空")
+        warnings.append("未能根据 Invoice Ship to 识别运抵国/最终目的国，相关字段将留空")
+    if not trade_country:
+        warnings.append("未能根据 Invoice Bill to 识别贸易国，相关字段将留空")
 
     groups = {}
     for item in enriched:
@@ -1520,6 +1612,7 @@ def merge_preview(invoice, packing, rules):
         "grossWeight": packing.get("grossWeight") or "",
         "netWeight": packing.get("netWeight") or total_net_weight,
         "originCountry": "中国",
+        "tradeCountry": trade_country,
         "destinationCountry": destination_country,
         "domesticSource": "苏州工业园区",
         "commodityLines": commodity_lines,
@@ -1867,6 +1960,19 @@ def normalize_workbook_open_state(workbook):
                 sheet.attrib.pop("state", None)
 
 
+def unhide_rows(sheet_root):
+    changed = False
+    sheet_format = sheet_root.find(f"{{{NS_MAIN}}}sheetFormatPr")
+    if sheet_format is not None and sheet_format.attrib.pop("zeroHeight", None) is not None:
+        changed = True
+    for row in sheet_root.findall(f".//{{{NS_MAIN}}}row"):
+        if row.attrib.pop("hidden", None) is not None:
+            changed = True
+        if row.attrib.pop("zeroHeight", None) is not None:
+            changed = True
+    return changed
+
+
 def generate_workbook(preview):
     template = active_template_path()
     if not template.exists():
@@ -1889,6 +1995,7 @@ def generate_workbook(preview):
 
         main_path = sheets.get("Sheet1") or next(iter(sheets.values()))
         main_root = ET.fromstring(zin.read(main_path))
+        unhide_rows(main_root)
 
         values = {
             "C3": "91320594762449680U",
@@ -1901,8 +2008,8 @@ def generate_workbook(preview):
             "E8": "一般",
             "G8": "101",
             "A10": preview["contractNo"],
-            "E10": "意大利",
-            "G10": "意大利",
+            "E10": preview.get("tradeCountry") or "",
+            "G10": preview.get("destinationCountry") or "",
             "O10": "上海",
             "A12": preview["packageKind"],
             "E12": preview["packageCount"],
@@ -1960,6 +2067,7 @@ def generate_workbook(preview):
         if "申报要素" in sheets:
             decl_path = sheets["申报要素"]
             decl_root = ET.fromstring(zin.read(decl_path))
+            unhide_rows(decl_root)
             for row in range(1, 180):
                 for col in ("A", "B", "C", "D"):
                     clear_cell(decl_root, f"{col}{row}")
@@ -1977,6 +2085,13 @@ def generate_workbook(preview):
                 cursor += 8
             update_worksheet_dimension(decl_root)
             modified[decl_path] = serialize_excel_xml(decl_root)
+
+        for sheet_path in sheets.values():
+            if sheet_path in modified:
+                continue
+            sheet_root = ET.fromstring(zin.read(sheet_path))
+            if unhide_rows(sheet_root):
+                modified[sheet_path] = serialize_excel_xml(sheet_root)
 
         remove_calc_chain(rels, content_types)
         normalize_workbook_open_state(workbook)
