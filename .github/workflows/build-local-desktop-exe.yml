@@ -5,6 +5,7 @@ on:
   push:
     paths:
       - "local_desktop_app/**"
+      - "最新逻辑_请优先看/**"
       - ".github/workflows/build-local-desktop-exe.yml"
 
 jobs:
@@ -38,5 +39,11 @@ jobs:
       - name: Upload exe
         uses: actions/upload-artifact@v4
         with:
-          name: IMOS报关单生成-windows-exe
-          path: local_desktop_app/dist/IMOS报关单生成.exe
+          name: 报关单生成-windows-exe
+          path: local_desktop_app/dist/报关单生成.exe
+
+      - name: Upload customer package
+        uses: actions/upload-artifact@v4
+        with:
+          name: 报关单生成-客户交付包
+          path: local_desktop_app/dist/报关单生成-客户交付包.zip

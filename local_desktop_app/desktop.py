@@ -126,7 +126,7 @@ def main():
             return
 
         try:
-            window = webview.create_window("IMOS 报关单生成", url, width=1280, height=860)
+            window = webview.create_window("报关单生成", url, width=1280, height=860)
             webview.start()
             return window
         except Exception:

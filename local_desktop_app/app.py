@@ -247,6 +247,27 @@ def json_response(handler, status, payload):
     handler.wfile.write(body)
 
 
+def validate_xlsx_file(path):
+    try:
+        with zipfile.ZipFile(path, "r") as workbook:
+            required = {
+                "[Content_Types].xml",
+                "xl/workbook.xml",
+                "xl/_rels/workbook.xml.rels",
+            }
+            names = set(workbook.namelist())
+            missing = required - names
+            if missing:
+                raise ValueError("缺少必要文件：" + "、".join(sorted(missing)))
+            ET.fromstring(workbook.read("xl/workbook.xml"))
+            ET.fromstring(workbook.read("xl/_rels/workbook.xml.rels"))
+            ET.fromstring(workbook.read("[Content_Types].xml"))
+    except zipfile.BadZipFile as exc:
+        raise ValueError("生成文件不是有效的 Excel 工作簿") from exc
+    except ET.ParseError as exc:
+        raise ValueError("生成文件内部结构异常") from exc
+
+
 def safe_text(value):
     if value is None:
         return ""
@@ -806,7 +827,6 @@ def parse_invoice(path):
 
     cols = {
         "part": find_col("qad pn", "part no"),
-        "imos": find_col("imos p/n", "imos pn"),
         "description_en": find_col("description"),
         "quantity": find_col("qty", "quantity"),
         "unit_price": find_col("up"),
@@ -851,7 +871,6 @@ def parse_invoice(path):
         is_applied_row = quantity > 0 or amount > 0
         if is_applied_row:
             append_text_anomaly(anomalies, "Invoice", invoice_sheet_idx, row_idx, row, cols["part"], "QAD PN")
-            append_text_anomaly(anomalies, "Invoice", invoice_sheet_idx, row_idx, row, cols["imos"], "IMOS P/N")
             append_numeric_anomaly(anomalies, "Invoice", invoice_sheet_idx, row_idx, row, cols["quantity"], "Quantity", True)
             append_numeric_anomaly(anomalies, "Invoice", invoice_sheet_idx, row_idx, row, cols["amount"], "Amount", True)
             append_numeric_anomaly(anomalies, "Invoice", invoice_sheet_idx, row_idx, row, cols["unit_price"], "UP", True)
@@ -864,16 +883,16 @@ def parse_invoice(path):
         currency = item_currency or currency
         items.append({
             "partNo": part,
-            "imosPartNo": safe_text(row[cols["imos"]]) if cols["imos"] is not None and cols["imos"] < len(row) else part,
+            "imosPartNo": part,
             "descriptionEn": safe_text(row[cols["description_en"]]) if cols["description_en"] is not None and cols["description_en"] < len(row) else "",
             "quantity": quantity,
             "unitPrice": unit_price,
             "amount": amount,
             "currency": item_currency or currency,
             "poNo": safe_text(row[cols["po"]]) if cols["po"] is not None and cols["po"] < len(row) else "",
-            "goodsName": safe_text(row[cols["goods_name"]]) if cols["goods_name"] is not None and cols["goods_name"] < len(row) else "",
-            "hsCode": normalize_hs(row[cols["hs_code"]]) if cols["hs_code"] is not None and cols["hs_code"] < len(row) else "",
-            "brand": normalize_brand(row[cols["brand"]]) if cols["brand"] is not None and cols["brand"] < len(row) else "",
+            "goodsName": "",
+            "hsCode": "",
+            "brand": "",
             "model": safe_text(row[cols["model"]]) if cols["model"] is not None and cols["model"] < len(row) else "",
             "sourceRow": row_idx + 1,
             "sourceSheet": f"Sheet {invoice_sheet_idx + 1}",
@@ -1014,7 +1033,18 @@ def load_rules(path=None):
                 continue
             header = [safe_text(v).lower() for v in rows[header_idx]]
             compact_header = normalized_header(rows[header_idx])
-            part_cols = [i for i, v in enumerate(header) if "part" in v or "pn" in v]
+            part_cols = [
+                i for i, v in enumerate(header)
+                if (
+                    "qad" in v
+                    or "part no" in v
+                    or "partno" in v
+                    or "old part" in v
+                    or "料号" in v
+                )
+                and "imos" not in v
+                and "报关单pn" not in v
+            ]
             hs_col = next((i for i, v in enumerate(compact_header) if ("hs" in v and "code" in v) or "商品编号" in header[i]), None)
             desc_col = next((i for i, v in enumerate(header) if "description" in v or "货物名称" in v or "商品名称" in v), None)
             brand_col = next((i for i, v in enumerate(header) if "品牌" in v or "brand" in v), None)
@@ -1056,11 +1086,11 @@ def merge_preview(invoice, packing, rules):
     enriched = []
     missing_rules = []
     for item in invoice["items"]:
-        rule = rules.get(normalize_part(item["partNo"])) or rules.get(normalize_part(item["imosPartNo"])) or {}
+        rule = rules.get(normalize_part(item["partNo"])) or {}
         merged = dict(item)
-        merged["hsCode"] = item.get("hsCode") or rule.get("hsCode", "")
-        merged["goodsName"] = item.get("goodsName") or rule.get("goodsName", "")
-        merged["brand"] = normalize_brand(item.get("brand") or rule.get("brand", ""))
+        merged["hsCode"] = rule.get("hsCode", "")
+        merged["goodsName"] = rule.get("goodsName", "")
+        merged["brand"] = normalize_brand(rule.get("brand", ""))
         merged["netWeight"] = packing.get("partWeights", {}).get(normalize_part(item["partNo"]), "")
         merged["grossWeight"] = packing.get("partGrossWeights", {}).get(normalize_part(item["partNo"]), "")
         if not merged["hsCode"] or not merged["goodsName"]:
@@ -1114,10 +1144,9 @@ def merge_preview(invoice, packing, rules):
                 "itemNo": row["itemNo"],
                 "hsCode": row["hsCode"],
                 "goodsName": row["goodsName"],
-                "brand": row["brand"],
-                "qadPartNo": item.get("partNo", ""),
-                "imosPartNo": item.get("imosPartNo", ""),
-                "invoiceQuantity": round2(to_number(item.get("quantity"))),
+            "brand": row["brand"],
+            "qadPartNo": item.get("partNo", ""),
+            "invoiceQuantity": round2(to_number(item.get("quantity"))),
                 "packingNetWeight": round2(to_number(item.get("netWeight"))),
                 "packingGrossWeight": round2(to_number(item.get("grossWeight"))),
                 "unitPrice": round2(to_number(item.get("unitPrice"))),
@@ -1350,7 +1379,6 @@ def audit_rows(preview):
             "商品编号",
             "商品名称",
             "QAD PN",
-            "IMOS PN",
             "Invoice 数量",
             "Invoice 单价",
             "Invoice 金额",
@@ -1379,7 +1407,6 @@ def audit_rows(preview):
             sample.get("hsCode", ""),
             sample.get("goodsName", ""),
             sample.get("qadPartNo", ""),
-            sample.get("imosPartNo", ""),
             quantity,
             sample.get("unitPrice", ""),
             amount,
@@ -1460,12 +1487,51 @@ def add_audit_sheet(workbook, rels, content_types_root, sheets, modified, previe
     modified[sheet_path] = simple_sheet_xml(audit_rows(preview))
 
 
+def remove_calc_chain(rels, content_types_root):
+    for rel in list(rels):
+        if rel.attrib.get("Type", "").endswith("/calcChain") or rel.attrib.get("Target") == "calcChain.xml":
+            rels.remove(rel)
+    for item in list(content_types_root):
+        if item.attrib.get("PartName") == "/xl/calcChain.xml":
+            content_types_root.remove(item)
+
+
+def normalize_workbook_open_state(workbook):
+    book_views = workbook.find(f"{{{NS_MAIN}}}bookViews")
+    if book_views is None:
+        book_views = ET.Element(f"{{{NS_MAIN}}}bookViews")
+        first_child = next(iter(list(workbook)), None)
+        if first_child is None:
+            workbook.append(book_views)
+        else:
+            workbook.insert(0, book_views)
+    workbook_view = book_views.find(f"{{{NS_MAIN}}}workbookView")
+    if workbook_view is None:
+        workbook_view = ET.SubElement(book_views, f"{{{NS_MAIN}}}workbookView")
+    workbook_view.attrib.update({
+        "visibility": "visible",
+        "activeTab": "0",
+        "firstSheet": "0",
+        "xWindow": "0",
+        "yWindow": "0",
+        "windowWidth": "24000",
+        "windowHeight": "14000",
+    })
+    workbook_view.attrib.pop("minimized", None)
+
+    sheets_node = workbook.find(f"{{{NS_MAIN}}}sheets")
+    if sheets_node is not None:
+        for idx, sheet in enumerate(sheets_node.findall(f"{{{NS_MAIN}}}sheet")):
+            if idx == 0:
+                sheet.attrib.pop("state", None)
+
+
 def generate_workbook(preview):
     template = active_template_path()
     if not template.exists():
         raise ValueError("未找到报关单模板，请先在管理员页面上传模板")
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    output_name = f"报关单 IMOS {preview['contractNo']}.xlsx"
+    output_name = f"报关单 {preview['contractNo']}.xlsx"
     output_path = OUTPUT_DIR / f"{uuid.uuid4().hex}-{output_name}"
 
     with zipfile.ZipFile(template, "r") as zin:
@@ -1570,6 +1636,8 @@ def generate_workbook(preview):
             modified[decl_path] = ET.tostring(decl_root, encoding="utf-8", xml_declaration=True)
 
         add_audit_sheet(workbook, rels, content_types, sheets, modified, preview)
+        remove_calc_chain(rels, content_types)
+        normalize_workbook_open_state(workbook)
         modified["xl/workbook.xml"] = ET.tostring(workbook, encoding="utf-8", xml_declaration=True)
         modified["xl/_rels/workbook.xml.rels"] = ET.tostring(rels, encoding="utf-8", xml_declaration=True)
         modified["[Content_Types].xml"] = ET.tostring(content_types, encoding="utf-8", xml_declaration=True)
@@ -1577,6 +1645,8 @@ def generate_workbook(preview):
         with zipfile.ZipFile(output_path, "w", zipfile.ZIP_DEFLATED) as zout:
             written = set()
             for info in zin.infolist():
+                if info.filename == "xl/calcChain.xml":
+                    continue
                 data = modified.get(info.filename)
                 if data is None:
                     data = zin.read(info.filename)
@@ -1770,6 +1840,11 @@ class AppHandler(BaseHTTPRequestHandler):
         if not path.exists():
             self.send_error(HTTPStatus.NOT_FOUND, "File not found")
             return
+        try:
+            validate_xlsx_file(path)
+        except ValueError as exc:
+            self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
+            return
         data = path.read_bytes()
         filename = item["filename"]
         encoded = urllib.parse.quote(filename)
@@ -1898,6 +1973,8 @@ class AppHandler(BaseHTTPRequestHandler):
         path = Path(record["filePaths"].get(kind) or "")
         if not path.exists():
             raise ValueError("历史文件不存在")
+        if kind == "output":
+            validate_xlsx_file(path)
         names = {
             "invoice": record["invoiceName"] or "invoice.xls",
             "packing": record["packingName"] or "packing.xls",

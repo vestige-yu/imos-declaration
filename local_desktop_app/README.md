@@ -1,4 +1,4 @@
-# Windows 本地版 IMOS 报关单生成工具
+# Windows 本地版报关单生成工具
 
 这是一套和线上网站隔离的本地桌面版文件。原网站根目录的 `app.py` 和 `static/` 不需要改动。
 
@@ -58,7 +58,7 @@ set SURI_DATA_DIR=D:\SuriWorkDeclarationData
 完成后生成：
 
 ```text
-dist\IMOS报关单生成.exe
+dist\报关单生成.exe
 ```
 
 ## 安全边界
