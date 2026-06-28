@@ -79,6 +79,7 @@ def self_test():
     }
     try:
         output_path, _ = app.generate_workbook(preview)
+        app.validate_xlsx_file(output_path)
         with zipfile.ZipFile(output_path) as workbook:
             bad_file = workbook.testzip()
             if bad_file:

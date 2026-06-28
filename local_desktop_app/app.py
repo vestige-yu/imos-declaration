@@ -63,7 +63,31 @@ NS_MAIN = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 NS_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 NS_PACKAGE_REL = "http://schemas.openxmlformats.org/package/2006/relationships"
 NS_CONTENT_TYPES = "http://schemas.openxmlformats.org/package/2006/content-types"
+EXCEL_COMPAT_NAMESPACES = {
+    "x14ac": "http://schemas.microsoft.com/office/spreadsheetml/2009/9/ac",
+    "x15": "http://schemas.microsoft.com/office/spreadsheetml/2010/11/main",
+    "xr": "http://schemas.microsoft.com/office/spreadsheetml/2014/revision",
+    "xr2": "http://schemas.microsoft.com/office/spreadsheetml/2015/revision2",
+    "xr3": "http://schemas.microsoft.com/office/spreadsheetml/2016/revision3",
+    "xr6": "http://schemas.microsoft.com/office/spreadsheetml/2016/revision6",
+    "xr10": "http://schemas.microsoft.com/office/spreadsheetml/2016/revision10",
+    "x16r2": "http://schemas.microsoft.com/office/spreadsheetml/2015/02/main",
+}
 ET.register_namespace("", NS_MAIN)
+ET.register_namespace("r", NS_REL)
+ET.register_namespace("mc", "http://schemas.openxmlformats.org/markup-compatibility/2006")
+ET.register_namespace("xdr", "http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing")
+ET.register_namespace("x14", "http://schemas.microsoft.com/office/spreadsheetml/2009/9/main")
+ET.register_namespace("x14ac", "http://schemas.microsoft.com/office/spreadsheetml/2009/9/ac")
+ET.register_namespace("x15", "http://schemas.microsoft.com/office/spreadsheetml/2010/11/main")
+ET.register_namespace("x15ac", "http://schemas.microsoft.com/office/spreadsheetml/2010/11/ac")
+ET.register_namespace("x16r2", "http://schemas.microsoft.com/office/spreadsheetml/2015/02/main")
+ET.register_namespace("xr", "http://schemas.microsoft.com/office/spreadsheetml/2014/revision")
+ET.register_namespace("xr2", "http://schemas.microsoft.com/office/spreadsheetml/2015/revision2")
+ET.register_namespace("xr3", "http://schemas.microsoft.com/office/spreadsheetml/2016/revision3")
+ET.register_namespace("xr6", "http://schemas.microsoft.com/office/spreadsheetml/2016/revision6")
+ET.register_namespace("xr10", "http://schemas.microsoft.com/office/spreadsheetml/2016/revision10")
+ET.register_namespace("xcalcf", "http://schemas.microsoft.com/office/spreadsheetml/2018/calcfeatures")
 
 
 def now_stamp():
@@ -256,6 +280,48 @@ def json_response(handler, status, payload):
     handler.wfile.write(body)
 
 
+def undeclared_ignorable_prefixes(xml_bytes):
+    text = xml_bytes.decode("utf-8", errors="ignore")
+    declared = set(re.findall(r"\bxmlns:([A-Za-z_][\w.-]*)=", text))
+    missing = set()
+    for match in re.finditer(r"\bIgnorable=\"([^\"]+)\"", text):
+        for prefix in match.group(1).split():
+            if prefix and prefix not in declared:
+                missing.add(prefix)
+    return sorted(missing)
+
+
+def ensure_excel_compat_namespace_declarations(xml_bytes):
+    text = xml_bytes.decode("utf-8")
+    required = set()
+    for attr in ("Ignorable", "Requires"):
+        for match in re.finditer(rf"\b{attr}=\"([^\"]+)\"", text):
+            required.update(prefix for prefix in match.group(1).split() if prefix)
+    declared = set(re.findall(r"\bxmlns:([A-Za-z_][\w.-]*)=", text))
+    additions = [
+        f' xmlns:{prefix}="{EXCEL_COMPAT_NAMESPACES[prefix]}"'
+        for prefix in sorted(required - declared)
+        if prefix in EXCEL_COMPAT_NAMESPACES
+    ]
+    if not additions:
+        return xml_bytes
+
+    root_start = text.find("<")
+    if text.startswith("<?xml"):
+        declaration_end = text.find("?>")
+        root_start = text.find("<", declaration_end + 2)
+    root_end = text.find(">", root_start)
+    if root_start < 0 or root_end < 0:
+        return xml_bytes
+    text = text[:root_end] + "".join(additions) + text[root_end:]
+    return text.encode("utf-8")
+
+
+def serialize_excel_xml(root):
+    xml_bytes = ET.tostring(root, encoding="utf-8", xml_declaration=True)
+    return ensure_excel_compat_namespace_declarations(xml_bytes)
+
+
 def validate_xlsx_file(path):
     try:
         with zipfile.ZipFile(path, "r") as workbook:
@@ -268,9 +334,13 @@ def validate_xlsx_file(path):
             missing = required - names
             if missing:
                 raise ValueError("缺少必要文件：" + "、".join(sorted(missing)))
-            ET.fromstring(workbook.read("xl/workbook.xml"))
-            ET.fromstring(workbook.read("xl/_rels/workbook.xml.rels"))
-            ET.fromstring(workbook.read("[Content_Types].xml"))
+            for name in workbook.namelist():
+                if name.endswith(".xml") or name.endswith(".rels"):
+                    content = workbook.read(name)
+                    ET.fromstring(content)
+                    missing_prefixes = undeclared_ignorable_prefixes(content) if name.endswith(".xml") else []
+                    if missing_prefixes:
+                        raise ValueError(f"{name} 存在未声明的 Excel 兼容性前缀：" + "、".join(missing_prefixes))
     except zipfile.BadZipFile as exc:
         raise ValueError("生成文件不是有效的 Excel 工作簿") from exc
     except ET.ParseError as exc:
@@ -1531,7 +1601,7 @@ def ensure_red_bold_style(styles_xml):
         "applyFont": "1",
     })
     cell_xfs.attrib["count"] = str(style_id + 1)
-    return style_id, ET.tostring(root, encoding="utf-8", xml_declaration=True)
+    return style_id, serialize_excel_xml(root)
 
 
 def simple_sheet_xml(rows):
@@ -1580,7 +1650,7 @@ def simple_sheet_xml(rows):
                 is_node = ET.SubElement(cell, f"{{{NS_MAIN}}}is")
                 t = ET.SubElement(is_node, f"{{{NS_MAIN}}}t")
                 t.text = safe_text(value)
-    return ET.tostring(worksheet, encoding="utf-8", xml_declaration=True)
+    return serialize_excel_xml(worksheet)
 
 
 def audit_rows(preview):
@@ -1836,7 +1906,7 @@ def generate_workbook(preview):
         flag_text_cell(main_root, "K75", preview["totals"]["currency"], red_style_id)
         flag_number_cell(main_root, "G76", preview["netWeight"], red_style_id, "H76")
 
-        modified = {main_path: ET.tostring(main_root, encoding="utf-8", xml_declaration=True)}
+        modified = {main_path: serialize_excel_xml(main_root)}
         if "申报要素" in sheets:
             decl_path = sheets["申报要素"]
             decl_root = ET.fromstring(zin.read(decl_path))
@@ -1855,11 +1925,11 @@ def generate_workbook(preview):
                 set_cell(decl_root, f"A{cursor + 5}", "4、用途：")
                 set_cell(decl_root, f"B{cursor + 5}", "汽车零部件用")
                 cursor += 8
-            modified[decl_path] = ET.tostring(decl_root, encoding="utf-8", xml_declaration=True)
+            modified[decl_path] = serialize_excel_xml(decl_root)
 
         remove_calc_chain(rels, content_types)
         normalize_workbook_open_state(workbook)
-        modified["xl/workbook.xml"] = ET.tostring(workbook, encoding="utf-8", xml_declaration=True)
+        modified["xl/workbook.xml"] = serialize_excel_xml(workbook)
         modified["xl/_rels/workbook.xml.rels"] = ET.tostring(rels, encoding="utf-8", xml_declaration=True)
         modified["[Content_Types].xml"] = ET.tostring(content_types, encoding="utf-8", xml_declaration=True)
 
