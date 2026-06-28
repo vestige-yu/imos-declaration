@@ -322,6 +322,46 @@ def serialize_excel_xml(root):
     return ensure_excel_compat_namespace_declarations(xml_bytes)
 
 
+def split_cell_ref(ref):
+    match = re.match(r"\$?([A-Z]+)\$?(\d+)$", safe_text(ref).upper())
+    if not match:
+        return None
+    return int(match.group(2)), column_to_number(match.group(1))
+
+
+def worksheet_cell_bounds(root):
+    max_row = 1
+    max_col = 1
+    for cell in root.findall(f".//{{{NS_MAIN}}}c"):
+        pos = split_cell_ref(cell.attrib.get("r", ""))
+        if not pos:
+            continue
+        row, col = pos
+        max_row = max(max_row, row)
+        max_col = max(max_col, col)
+    return max_row, max_col
+
+
+def worksheet_dimension_end(root):
+    dimension = root.find(f"{{{NS_MAIN}}}dimension")
+    if dimension is None:
+        return None
+    ref = dimension.attrib.get("ref", "")
+    end_ref = ref.split(":")[-1]
+    return split_cell_ref(end_ref)
+
+
+def update_worksheet_dimension(root):
+    max_row, max_col = worksheet_cell_bounds(root)
+    dimension = root.find(f"{{{NS_MAIN}}}dimension")
+    if dimension is None:
+        dimension = ET.Element(f"{{{NS_MAIN}}}dimension")
+        sheet_pr = root.find(f"{{{NS_MAIN}}}sheetPr")
+        insert_at = list(root).index(sheet_pr) + 1 if sheet_pr is not None else 0
+        root.insert(insert_at, dimension)
+    dimension.attrib["ref"] = f"A1:{excel_col_name(max_col - 1)}{max_row}"
+
+
 def validate_xlsx_file(path):
     try:
         with zipfile.ZipFile(path, "r") as workbook:
@@ -341,6 +381,15 @@ def validate_xlsx_file(path):
                     missing_prefixes = undeclared_ignorable_prefixes(content) if name.endswith(".xml") else []
                     if missing_prefixes:
                         raise ValueError(f"{name} 存在未声明的 Excel 兼容性前缀：" + "、".join(missing_prefixes))
+                    if name.startswith("xl/worksheets/") and name.endswith(".xml"):
+                        sheet_root = ET.fromstring(content)
+                        end = worksheet_dimension_end(sheet_root)
+                        max_row, max_col = worksheet_cell_bounds(sheet_root)
+                        if end is None:
+                            raise ValueError(f"{name} 缺少工作表 dimension")
+                        end_row, end_col = end
+                        if end_row < max_row or end_col < max_col:
+                            raise ValueError(f"{name} 工作表 dimension 未覆盖实际单元格")
     except zipfile.BadZipFile as exc:
         raise ValueError("生成文件不是有效的 Excel 工作簿") from exc
     except ET.ParseError as exc:
@@ -1906,6 +1955,7 @@ def generate_workbook(preview):
         flag_text_cell(main_root, "K75", preview["totals"]["currency"], red_style_id)
         flag_number_cell(main_root, "G76", preview["netWeight"], red_style_id, "H76")
 
+        update_worksheet_dimension(main_root)
         modified = {main_path: serialize_excel_xml(main_root)}
         if "申报要素" in sheets:
             decl_path = sheets["申报要素"]
@@ -1925,6 +1975,7 @@ def generate_workbook(preview):
                 set_cell(decl_root, f"A{cursor + 5}", "4、用途：")
                 set_cell(decl_root, f"B{cursor + 5}", "汽车零部件用")
                 cursor += 8
+            update_worksheet_dimension(decl_root)
             modified[decl_path] = serialize_excel_xml(decl_root)
 
         remove_calc_chain(rels, content_types)
