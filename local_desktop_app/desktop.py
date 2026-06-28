@@ -116,22 +116,15 @@ def main():
         return self_test()
 
     port = int(os.environ.get("PORT") or find_free_port())
-    server, url = app.run_in_thread(host="127.0.0.1", port=port)
     try:
-        try:
-            import webview
-        except ImportError:
-            log_startup_error("pywebview unavailable, opened in the default browser.")
-            open_browser_and_wait(url)
-            return
+        server, url = app.run_in_thread(host="127.0.0.1", port=port)
+    except Exception:
+        log_startup_error("server startup failed:\n" + traceback.format_exc())
+        raise
 
-        try:
-            window = webview.create_window("报关单生成", url, width=1280, height=860)
-            webview.start()
-            return window
-        except Exception:
-            log_startup_error("pywebview startup failed:\n" + traceback.format_exc())
-            open_browser_and_wait(url)
+    try:
+        log_startup_error(f"started successfully: {url}")
+        open_browser_and_wait(url)
     finally:
         server.shutdown()
         server.server_close()

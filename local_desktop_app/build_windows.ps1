@@ -10,7 +10,6 @@ pyinstaller `
   --windowed `
   --onefile `
   --clean `
-  --collect-all webview `
   --add-data "static;static" `
   --add-data "报关单 IMOS 空白模板.xlsx;." `
   --add-data "$ConfigFile;." `
