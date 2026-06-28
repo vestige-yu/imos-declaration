@@ -1,5 +1,8 @@
 $ErrorActionPreference = "Stop"
 
+$LogicDir = Resolve-Path (Join-Path $PSScriptRoot "..\最新逻辑_请优先看")
+$ConfigFile = Resolve-Path (Join-Path $LogicDir "报关单配置关系表.xlsx")
+
 python -m pip install -r requirements.txt
 
 pyinstaller `
@@ -10,12 +13,12 @@ pyinstaller `
   --collect-all webview `
   --add-data "static;static" `
   --add-data "报关单 IMOS 空白模板.xlsx;." `
+  --add-data "$ConfigFile;." `
   --add-data "2026+Daily+Export+List.xlsx;." `
   desktop.py
 
 $PackageDir = Join-Path $PSScriptRoot "dist\报关单生成-客户交付包"
 $PackageZip = Join-Path $PSScriptRoot "dist\报关单生成-客户交付包.zip"
-$LogicDir = Resolve-Path (Join-Path $PSScriptRoot "..\最新逻辑_请优先看")
 
 if (Test-Path $PackageDir) {
   Remove-Item $PackageDir -Recurse -Force

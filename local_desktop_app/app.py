@@ -30,7 +30,9 @@ RESOURCE_DIR = Path(getattr(sys, "_MEIPASS", BASE_DIR))
 STATIC_DIR = RESOURCE_DIR / "static"
 
 DEFAULT_TEMPLATE = RESOURCE_DIR / "报关单 IMOS 空白模板.xlsx"
-DEFAULT_RULES = RESOURCE_DIR / "2026+Daily+Export+List.xlsx"
+DEFAULT_RULES = RESOURCE_DIR / "报关单配置关系表.xlsx"
+SOURCE_RULES = BASE_DIR.parent / "最新逻辑_请优先看" / "报关单配置关系表.xlsx"
+LEGACY_RULES = RESOURCE_DIR / "2026+Daily+Export+List.xlsx"
 
 
 def app_data_dir():
@@ -79,7 +81,13 @@ def active_template_path():
 
 def active_rules_path():
     uploaded = RULES_DIR / "rules.xlsx"
-    return uploaded if uploaded.exists() else DEFAULT_RULES
+    if uploaded.exists():
+        return uploaded
+    if DEFAULT_RULES.exists():
+        return DEFAULT_RULES
+    if SOURCE_RULES.exists():
+        return SOURCE_RULES
+    return LEGACY_RULES
 
 
 def storage_meta_path():
@@ -298,6 +306,24 @@ def normalize_part(value):
     return safe_text(value).upper().replace(" ", "")
 
 
+def normalize_transport_mode(value):
+    text = safe_text(value)
+    compact = re.sub(r"[\s/_-]+", "", text).lower()
+    if any(term in compact for term in ("air", "dhl", "fedex", "ups", "express")):
+        return "航空运输"
+    if any(term in compact for term in ("sea", "ocean", "fcl", "lcl")):
+        return "水路运输"
+    return ""
+
+
+def normalize_trade_term(value):
+    text = safe_text(value).upper()
+    match = re.search(r"\b(CPT|FOB|EXW)\b", text)
+    if match:
+        return match.group(1)
+    return text.split()[0] if text.split() else ""
+
+
 def normalize_hs(value):
     text = safe_text(value)
     if re.fullmatch(r"\d+\.0", text):
@@ -332,6 +358,50 @@ def excel_serial_from_yyyymmdd(text):
     import datetime as _dt
     base = _dt.date(1899, 12, 30)
     return (_dt.date(year, month, day) - base).days
+
+
+def adjacent_value(row, idx):
+    text = safe_text(row[idx]) if idx < len(row) else ""
+    if ":" in text:
+        candidate = text.split(":", 1)[-1].strip()
+        if candidate:
+            return candidate
+    for value in row[idx + 1:]:
+        candidate = safe_text(value)
+        if candidate:
+            return candidate
+    return ""
+
+
+def normalize_document_no(value):
+    text = safe_text(value).upper().replace(" ", "")
+    match = re.search(r"\b[A-Z]{1,4}\d{6,}(?:-\d+)?\b", text)
+    return match.group(0) if match else ""
+
+
+def is_business_label(value):
+    text = safe_text(value).lower()
+    labels = (
+        "bill to", "ship to", "serial", "page", "our ref", "customer",
+        "delivery", "term", "telephone", "fax", "post code", "address",
+    )
+    return not text or any(label in text for label in labels)
+
+
+def extract_party_after_label(sheet, label_pattern, max_rows=30):
+    for row_idx, row in enumerate(sheet[:max_rows]):
+        for col_idx, value in enumerate(row):
+            if re.search(label_pattern, safe_text(value), re.I):
+                same_row = adjacent_value(row, col_idx)
+                if same_row and not is_business_label(same_row):
+                    return same_row
+                for next_row in sheet[row_idx + 1: min(len(sheet), row_idx + 6)]:
+                    for idx in (col_idx, col_idx + 1):
+                        if idx < len(next_row):
+                            candidate = safe_text(next_row[idx])
+                            if candidate and not is_business_label(candidate):
+                                return candidate
+    return ""
 
 
 class XlsWorkbook:
@@ -705,6 +775,50 @@ def normalized_header(row):
     return [safe_text(v).lower().replace(" ", "").replace("_", "") for v in row]
 
 
+def is_enabled_value(value):
+    text = safe_text(value).strip().lower()
+    return text not in ("否", "no", "n", "false", "0", "禁用", "停用")
+
+
+def find_header_index_by_terms(rows, required_groups):
+    for idx, row in enumerate(rows):
+        compact = "".join(safe_text(v).lower().replace(" ", "").replace("_", "") for v in row)
+        if all(any(term.lower().replace(" ", "").replace("_", "") in compact for term in group) for group in required_groups):
+            return idx
+    return None
+
+
+def header_col(headers, *terms):
+    normalized_terms = [term.lower().replace(" ", "").replace("_", "") for term in terms]
+    compact_headers = [safe_text(v).lower().replace(" ", "").replace("_", "") for v in headers]
+    for term in normalized_terms:
+        for idx, value in enumerate(compact_headers):
+            if term == value:
+                return idx
+    for term in normalized_terms:
+        for idx, value in enumerate(compact_headers):
+            if term in value:
+                return idx
+    return None
+
+
+def standardize_config_value(rules, category, value, allow_contains=False):
+    text = safe_text(value)
+    if not text:
+        return ""
+    entries = rules.get("__standardization", {}).get(category, [])
+    lowered = text.lower()
+    for raw, standard in entries:
+        if lowered == safe_text(raw).lower():
+            return standard
+    if allow_contains:
+        for raw, standard in entries:
+            raw_text = safe_text(raw).lower()
+            if raw_text and raw_text in lowered:
+                return standard
+    return ""
+
+
 def find_header_row(rows, required_any_groups):
     for idx, row in enumerate(rows):
         text = " ".join(safe_text(v).lower() for v in row)
@@ -845,19 +959,35 @@ def parse_invoice(path):
     contract = ""
     consignee = ""
     trade_term = "CPT"
+    transport_mode = normalize_transport_mode(Path(path).name)
     currency = "USD"
     export_date = excel_serial_from_yyyymmdd(Path(path).name)
     for row in invoice_sheet[:30]:
         for idx, value in enumerate(row):
             text = safe_text(value)
-            if re.fullmatch(r"SP\d{8,}", text):
-                contract = text
+            if re.search(r"serial\s*no", text, re.I):
+                contract = normalize_document_no(adjacent_value(row, idx)) or contract
+            if not contract:
+                contract = normalize_document_no(text) or contract
             if "CASCO Imos" in text:
                 consignee = text.strip()
-            if "Delivery Term:" in text:
-                trade_term = text.split(":", 1)[-1].strip().split()[0]
+            if re.search(r"delivery\s*term", text, re.I):
+                candidate = text.split(":", 1)[-1] if ":" in text else ""
+                if not candidate and idx + 1 < len(row):
+                    candidate = row[idx + 1]
+                trade_term = normalize_trade_term(candidate) or trade_term
+            if re.search(r"delivery\s*(way|mode|method)|transport", text, re.I):
+                candidate = text.split(":", 1)[-1] if ":" in text else ""
+                if not candidate and idx + 1 < len(row):
+                    candidate = row[idx + 1]
+                transport_mode = normalize_transport_mode(candidate) or transport_mode
             if text in ("USD", "EUR", "CNY"):
                 currency = text
+    consignee = (
+        extract_party_after_label(invoice_sheet, r"ship\s*to")
+        or extract_party_after_label(invoice_sheet, r"bill\s*to")
+        or consignee
+    )
 
     items = []
     anomalies = []
@@ -898,9 +1028,16 @@ def parse_invoice(path):
         })
 
     return {
-        "contractNo": contract or Path(path).stem.split()[0],
+        "contractNo": contract or normalize_document_no(Path(path).stem) or Path(path).stem.split()[0],
         "consignee": consignee or "CASCO Imos Italia S.R.L.",
+        "countryContext": "\n".join(
+            safe_text(value)
+            for row in invoice_sheet[:30]
+            for value in row
+            if safe_text(value)
+        ),
         "tradeTerm": trade_term or "CPT",
+        "transportMode": transport_mode,
         "currency": currency or "USD",
         "exportDateSerial": export_date,
         "items": items,
@@ -917,6 +1054,14 @@ def parse_packing(path):
     part_gross_weights = {}
     export_date = excel_serial_from_yyyymmdd(Path(path).name)
     anomalies = []
+
+    for sheet in sheets:
+        for row in sheet:
+            for value in row:
+                text = safe_text(value)
+                match = re.search(r"\b(\d+)\s*(pallet|plt|托盘)s?\b", text, re.I)
+                if match:
+                    package_count = max(package_count, int(match.group(1)))
 
     for sheet_idx, sheet in enumerate(sheets):
         header_idx = find_header_row(sheet, [("qad pn", "part no"), ("qty", "quantity"), ("n.w", "nw")])
@@ -964,6 +1109,24 @@ def parse_packing(path):
                 continue
             part = safe_text(row[part_col])
             quantity = to_number(row[qty_col])
+            summary_pallet_count = (
+                int(to_number(row[pallet_col]))
+                if pallet_col is not None
+                and pallet_col < len(row)
+                and not part
+                and to_number(row[pallet_col])
+                and net_col < len(row)
+                and gross_col < len(row)
+                and (to_number(row[net_col]) or to_number(row[gross_col]))
+                else 0
+            )
+            if summary_pallet_count:
+                package_count = max(package_count, summary_pallet_count)
+                if not net_weight and net_col < len(row) and to_number(row[net_col]):
+                    net_weight = round2(to_number(row[net_col]))
+                if not gross_weight and gross_col < len(row) and to_number(row[gross_col]):
+                    gross_weight = round2(to_number(row[gross_col]))
+                continue
             if quantity < 1 or not re.match(r"^\d{9,}-\w+", part):
                 continue
             append_text_anomaly(anomalies, "Packing list", sheet_idx, row_idx, row, part_col, "QAD PN")
@@ -1020,18 +1183,42 @@ def load_rules(path=None):
     path = Path(path) if path else active_rules_path()
     if not path.exists():
         return {}
-    rules = {}
+    rules = {"__standardization": {}}
     book = XlsxBook(path)
     try:
-        for sheet_name in book.sheet_map:
+        if "值标准化表" in book.sheet_map:
+            rows = book.rows("值标准化表")
+            if rows:
+                headers = rows[0]
+                type_col = header_col(headers, "类型")
+                raw_col = header_col(headers, "原始值")
+                standard_col = header_col(headers, "标准值")
+                enabled_col = header_col(headers, "是否启用")
+                for row in rows[1:]:
+                    if enabled_col is not None and enabled_col < len(row) and not is_enabled_value(row[enabled_col]):
+                        continue
+                    if type_col is None or raw_col is None or standard_col is None:
+                        continue
+                    if max(type_col, raw_col, standard_col) >= len(row):
+                        continue
+                    category = safe_text(row[type_col])
+                    raw_value = safe_text(row[raw_col])
+                    standard_value = safe_text(row[standard_col])
+                    if category and raw_value and standard_value:
+                        rules["__standardization"].setdefault(category, []).append((raw_value, standard_value))
+
+        product_sheet_names = [name for name in book.sheet_map if "商品主数据" in name]
+        sheet_names = product_sheet_names or list(book.sheet_map)
+        for sheet_name in sheet_names:
             rows = book.rows(sheet_name)
             if not rows:
                 continue
-            header_idx = find_header_row(rows, [("qad pn", "part", "pn"), ("hs code", "商品编号")])
+            header_idx = find_header_index_by_terms(rows, [("qad pn", "part", "part no", "料号"), ("hs code", "商品编号")])
             if header_idx is None:
                 continue
             header = [safe_text(v).lower() for v in rows[header_idx]]
             compact_header = normalized_header(rows[header_idx])
+            enabled_col = header_col(rows[header_idx], "是否启用")
             part_cols = [
                 i for i, v in enumerate(header)
                 if (
@@ -1050,6 +1237,8 @@ def load_rules(path=None):
             if not part_cols or hs_col is None:
                 continue
             for row in rows[header_idx + 1:]:
+                if enabled_col is not None and enabled_col < len(row) and not is_enabled_value(row[enabled_col]):
+                    continue
                 for part_col in part_cols:
                     if part_col >= len(row):
                         continue
@@ -1062,10 +1251,26 @@ def load_rules(path=None):
                     if desc_col is not None and desc_col < len(row) and safe_text(row[desc_col]):
                         rules[key]["goodsName"] = safe_text(row[desc_col])
                     if brand_col is not None and brand_col < len(row) and safe_text(row[brand_col]):
-                        rules[key]["brand"] = normalize_brand(row[brand_col])
+                        rules[key]["brand"] = standardize_config_value(rules, "品牌", row[brand_col]) or normalize_brand(row[brand_col])
     finally:
         book.close()
     return rules
+
+
+def infer_destination_country(invoice, rules):
+    entries = rules.get("__standardization", {}).get("国家/地区", [])
+    contexts = [invoice.get("consignee", ""), invoice.get("countryContext", "")]
+    for context in contexts:
+        lowered = safe_text(context).lower()
+        if not lowered:
+            continue
+        for raw, standard in entries:
+            if safe_text(standard) == "中国":
+                continue
+            raw_text = safe_text(raw).lower()
+            if raw_text and raw_text in lowered:
+                return standard
+    return ""
 
 
 def merge_preview(invoice, packing, rules):
@@ -1099,6 +1304,10 @@ def merge_preview(invoice, packing, rules):
     if missing_rules:
         warnings.append("以下 Part No. 未完整匹配到 HS/商品名称规则：" + "、".join(missing_rules[:20]))
 
+    destination_country = infer_destination_country(invoice, rules)
+    if not destination_country:
+        warnings.append("未能根据客户/地址和值标准化表推断贸易国/运抵国/最终目的国，相关字段将留空")
+
     groups = {}
     for item in enriched:
         key = (
@@ -1106,12 +1315,14 @@ def merge_preview(invoice, packing, rules):
             item.get("goodsName") or item.get("descriptionEn") or "未匹配商品名称",
             item.get("brand") or "无",
             item.get("currency") or invoice["currency"],
+            destination_country,
         )
         group = groups.setdefault(key, {
             "hsCode": key[0],
             "goodsName": key[1],
             "brand": key[2],
             "currency": key[3],
+            "destinationCountry": key[4],
             "quantity": 0.0,
             "amount": 0.0,
             "netWeight": 0.0,
@@ -1171,14 +1382,15 @@ def merge_preview(invoice, packing, rules):
         "contractNo": invoice["contractNo"],
         "consignee": invoice["consignee"],
         "tradeTerm": invoice["tradeTerm"],
+        "transportMode": invoice.get("transportMode", ""),
         "currency": invoice["currency"],
         "exportDateSerial": invoice.get("exportDateSerial") or packing.get("exportDateSerial") or "",
-        "packageKind": "托盘",
+        "packageKind": "再生木托",
         "packageCount": packing.get("packageCount") or "",
         "grossWeight": packing.get("grossWeight") or "",
         "netWeight": packing.get("netWeight") or total_net_weight,
         "originCountry": "中国",
-        "destinationCountry": "意大利",
+        "destinationCountry": destination_country,
         "domesticSource": "苏州工业园区",
         "commodityLines": commodity_lines,
         "totals": {
@@ -1552,14 +1764,19 @@ def generate_workbook(preview):
         main_root = ET.fromstring(zin.read(main_path))
 
         values = {
-            "A4": "凯斯库汽车部件（苏州）有限公司",
+            "C3": "91320594762449680U",
+            "A4": "凯斯库汽车部件（苏州）有限公司3205240783",
             "G4": preview.get("exportDateSerial") or "",
             "A6": preview["consignee"],
-            "E6": "水路运输",
-            "A8": "凯斯库汽车部件（苏州）有限公司",
+            "E6": preview.get("transportMode") or "",
+            "C7": "91320594762449680U",
+            "A8": "凯斯库汽车部件（苏州）有限公司3205240783",
+            "E8": "一般",
+            "G8": "101",
             "A10": preview["contractNo"],
             "E10": "意大利",
             "G10": "意大利",
+            "O10": "上海",
             "A12": preview["packageKind"],
             "E12": preview["packageCount"],
             "F12": preview["grossWeight"],
@@ -1588,6 +1805,7 @@ def generate_workbook(preview):
             set_cell(main_root, f"L{row_num}", preview["originCountry"])
             set_cell(main_root, f"M{row_num}", preview["destinationCountry"])
             set_cell(main_root, f"O{row_num}", preview["domesticSource"])
+            set_cell(main_root, f"R{row_num}", "照章征税")
             set_cell(main_root, f"B{row_num + 1}", line["brand"])
             set_cell(main_root, f"G{row_num + 1}", line["netWeight"])
             set_cell(main_root, f"H{row_num + 1}", "千克")
