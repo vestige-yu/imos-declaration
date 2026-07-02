@@ -815,6 +815,24 @@ class XlsWorkbook:
             return None
         return value
 
+    @staticmethod
+    def _decode_label_text(payload):
+        if len(payload) < 8:
+            return ""
+        char_count = struct.unpack_from("<H", payload, 6)[0]
+        remaining = len(payload) - 8
+        if remaining >= char_count and (remaining == char_count or payload[8] not in (0, 1, 4, 5, 8, 9, 12, 13)):
+            return payload[8:8 + char_count].decode("latin1", "ignore")
+        if remaining >= char_count * 2 and remaining == char_count * 2:
+            return payload[8:8 + char_count * 2].decode("utf-16le", "ignore")
+        if len(payload) < 9:
+            return ""
+        flags = payload[8]
+        offset = 9
+        width = 2 if flags & 0x01 else 1
+        raw = payload[offset:offset + char_count * width]
+        return raw.decode("utf-16le" if flags & 0x01 else "latin1", "ignore")
+
     def _read_sheets(self):
         sheets = []
         current = None
@@ -832,6 +850,9 @@ class XlsWorkbook:
                 pending_formula_cell = None
             elif current is None:
                 continue
+            elif rec_type == 0x0204 and len(payload) >= 9:
+                row, col, _ = struct.unpack_from("<HHH", payload, 0)
+                current[(row, col)] = self._decode_label_text(payload)
             elif rec_type == 0x00FD and len(payload) >= 10:
                 row, col, _, idx = struct.unpack_from("<HHHI", payload, 0)
                 current[(row, col)] = self.shared_strings[idx] if idx < len(self.shared_strings) else ""
@@ -1277,7 +1298,7 @@ def parse_packing(path):
         for row in sheet:
             for value in row:
                 text = safe_text(value)
-                match = re.search(r"\b(\d+)\s*(pallet|plt|托盘)s?\b", text, re.I)
+                match = re.search(r"\b(\d+)\s*(pallet|plt|carton|ctn|托盘|箱)s?\b", text, re.I)
                 if match:
                     package_count = max(package_count, int(match.group(1)))
 
@@ -1351,10 +1372,11 @@ def parse_packing(path):
             append_numeric_anomaly(anomalies, "Packing list", sheet_idx, row_idx, row, qty_col, "Quantity", True)
             append_numeric_anomaly(anomalies, "Packing list", sheet_idx, row_idx, row, net_col, "N.W.(KG)", True)
             append_numeric_anomaly(anomalies, "Packing list", sheet_idx, row_idx, row, gross_col, "G.W.(KG)", True)
+            part_key = normalize_part(part)
             item_net_weight = round2(to_number(row[net_col]))
             item_gross_weight = round2(to_number(row[gross_col])) if gross_col < len(row) else 0
-            part_weights[normalize_part(part)] = item_net_weight
-            part_gross_weights[normalize_part(part)] = item_gross_weight
+            part_weights[part_key] = round2(part_weights.get(part_key, 0) + item_net_weight)
+            part_gross_weights[part_key] = round2(part_gross_weights.get(part_key, 0) + item_gross_weight)
             summed_net_weight += item_net_weight
             summed_gross_weight += item_gross_weight
             if pallet_col is not None and pallet_col < len(row):
