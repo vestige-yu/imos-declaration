@@ -2,6 +2,8 @@ $ErrorActionPreference = "Stop"
 
 $LogicDir = Resolve-Path (Join-Path $PSScriptRoot "..\最新逻辑_请优先看")
 $ConfigFile = Resolve-Path (Join-Path $LogicDir "报关单配置关系表.xlsx")
+$MarkedTemplateFile = Resolve-Path (Join-Path $PSScriptRoot "..\报关单模板-标记版.xlsx")
+$MarkedTemplateGuide = Resolve-Path (Join-Path $PSScriptRoot "..\模板标记维护说明.md")
 
 python -m pip install -r requirements.txt
 
@@ -32,6 +34,8 @@ Copy-Item (Join-Path $LogicDir "报关单配置关系表.xlsx") $PackageDir
 Copy-Item (Join-Path $LogicDir "报关单生成取值逻辑说明.docx") $PackageDir
 Copy-Item (Join-Path $LogicDir "报关单配置关系表说明文档.docx") $PackageDir
 Copy-Item (Join-Path $LogicDir "README_最新逻辑.md") $PackageDir
+Copy-Item $MarkedTemplateFile $PackageDir
+Copy-Item $MarkedTemplateGuide $PackageDir
 
 Compress-Archive -Path (Join-Path $PackageDir "*") -DestinationPath $PackageZip -Force
 

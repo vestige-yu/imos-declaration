@@ -1219,8 +1219,8 @@ def parse_invoice(path):
             if text in ("USD", "EUR", "CNY"):
                 currency = text
     consignee = (
-        extract_party_after_label(invoice_sheet, r"ship\s*to")
-        or extract_party_after_label(invoice_sheet, r"bill\s*to")
+        extract_party_after_label(invoice_sheet, r"bill\s*to")
+        or extract_party_after_label(invoice_sheet, r"ship\s*to")
         or consignee
     )
     bill_to_context = "\n".join(extract_block_after_label(invoice_sheet, r"bill\s*to"))
@@ -1736,6 +1736,188 @@ def clear_cell(root, ref):
     set_cell(root, ref, "")
 
 
+def worksheet_cell_text(cell, shared_strings):
+    cell_type = cell.attrib.get("t")
+    if cell_type == "inlineStr":
+        inline = cell.find(f"{{{NS_MAIN}}}is")
+        return "".join(t.text or "" for t in inline.findall(f".//{{{NS_MAIN}}}t")) if inline is not None else ""
+    value = cell.find(f"{{{NS_MAIN}}}v")
+    if value is None:
+        return ""
+    text = value.text or ""
+    if cell_type == "s":
+        idx = int(float(text)) if text else -1
+        return shared_strings[idx] if 0 <= idx < len(shared_strings) else ""
+    return text
+
+
+def zip_shared_strings(zip_file):
+    if "xl/sharedStrings.xml" not in zip_file.namelist():
+        return []
+    root = ET.fromstring(zip_file.read("xl/sharedStrings.xml"))
+    return ["".join(t.text or "" for t in si.findall(f".//{{{NS_MAIN}}}t")) for si in root.findall(f"{{{NS_MAIN}}}si")]
+
+
+def find_row_containing_text(sheet_root, shared_strings, target_text):
+    target = safe_text(target_text).lower()
+    for cell in sheet_root.findall(f".//{{{NS_MAIN}}}c"):
+        text = worksheet_cell_text(cell, shared_strings).lower()
+        if target and target in text:
+            match = re.match(r"[A-Z]+(\d+)", cell.attrib.get("r", ""))
+            if match:
+                return int(match.group(1))
+    return None
+
+
+def declaration_sheet_layout(sheet_root, shared_strings):
+    header_row = find_row_containing_text(sheet_root, shared_strings, "项号") or 17
+    subtotal_row = find_row_containing_text(sheet_root, shared_strings, "Sub Total") or 75
+    line_start = header_row + 1
+    if subtotal_row <= line_start + 1:
+        subtotal_row = 75
+    line_rows = []
+    row_num = line_start
+    while row_num + 1 < subtotal_row:
+        line_rows.append(row_num)
+        row_num += 3
+    return line_start, subtotal_row, line_rows
+
+
+def split_marker_cell_ref(ref):
+    match = re.match(r"([A-Z]+)(\d+)", ref)
+    if not match:
+        return "", 0
+    return match.group(1), int(match.group(2))
+
+
+def find_template_markers(sheet_root, shared_strings):
+    markers = {}
+    marker_pattern = re.compile(r"\{\{\s*([^{}]+?)\s*\}\}")
+    for cell in sheet_root.findall(f".//{{{NS_MAIN}}}c"):
+        ref = cell.attrib.get("r", "")
+        text = worksheet_cell_text(cell, shared_strings)
+        for match in marker_pattern.finditer(text):
+            markers.setdefault(match.group(1).strip(), []).append(ref)
+    return markers
+
+
+def first_marker_ref(markers, marker_name):
+    refs = markers.get(marker_name) or []
+    return refs[0] if refs else None
+
+
+def set_marker_value(sheet_root, markers, marker_name, value):
+    ref = first_marker_ref(markers, marker_name)
+    if ref:
+        set_cell(sheet_root, ref, value)
+    return ref
+
+
+def commodity_marker_blocks(markers):
+    item_refs = sorted(markers.get("商品项号", []), key=lambda ref: split_marker_cell_ref(ref)[1])
+    if not item_refs:
+        return []
+    marker_names = {
+        "商品项号", "商品编号", "商品名称", "数量", "数量单位", "金额", "币制",
+        "原产国", "最终目的国", "境内货源地", "征免", "品牌", "净重", "净重单位",
+    }
+    item_rows = [split_marker_cell_ref(ref)[1] for ref in item_refs]
+    result = []
+    for idx, item_ref in enumerate(item_refs):
+        start_row = item_rows[idx]
+        end_row = item_rows[idx + 1] if idx + 1 < len(item_rows) else 10**9
+        block = {"商品项号": item_ref}
+        for marker_name in marker_names - {"商品项号"}:
+            for ref in markers.get(marker_name, []):
+                row_num = split_marker_cell_ref(ref)[1]
+                if start_row <= row_num < end_row:
+                    block[marker_name] = ref
+                    break
+        result.append(block)
+    return result
+
+
+def fill_marker_template(sheet_root, markers, preview, red_style_id=None):
+    fixed_values = {
+        "境内发货人代码": "91320594762449680U",
+        "境内发货人": "凯斯库汽车部件（苏州）有限公司3205240783",
+        "出口日期": preview.get("exportDateSerial") or "",
+        "境外收货人": preview["consignee"],
+        "运输方式": preview.get("transportMode") or "",
+        "生产销售单位代码": "91320594762449680U",
+        "生产销售单位": "凯斯库汽车部件（苏州）有限公司3205240783",
+        "监管方式": "一般",
+        "征免性质": "101",
+        "合同协议号": preview["contractNo"],
+        "贸易国": preview.get("tradeCountry") or "",
+        "运抵国": preview.get("destinationCountry") or "",
+        "离境口岸": "上海",
+        "包装种类": preview["packageKind"],
+        "件数": preview["packageCount"],
+        "毛重": preview["grossWeight"],
+        "净重": preview["netWeight"],
+        "成交方式": preview["tradeTerm"],
+        "运费币制": preview["totals"]["currency"],
+    }
+    for marker_name, value in fixed_values.items():
+        set_marker_value(sheet_root, markers, marker_name, value)
+
+    blocks = commodity_marker_blocks(markers)
+    if len(preview["commodityLines"]) > len(blocks):
+        raise ValueError(f"报关单模板商品明细标记不足：模板可填写 {len(blocks)} 行，当前需要 {len(preview['commodityLines'])} 行")
+
+    field_values = {
+        "商品项号": lambda line: line["itemNo"],
+        "商品编号": lambda line: line["hsCode"],
+        "商品名称": lambda line: line["goodsName"],
+        "数量": lambda line: line["quantity"],
+        "数量单位": lambda line: "个",
+        "金额": lambda line: line["amount"],
+        "币制": lambda line: line["currency"],
+        "原产国": lambda line: preview["originCountry"],
+        "最终目的国": lambda line: preview["destinationCountry"],
+        "境内货源地": lambda line: preview["domesticSource"],
+        "征免": lambda line: "照章征税",
+        "品牌": lambda line: line["brand"],
+        "净重": lambda line: line["netWeight"],
+        "净重单位": lambda line: "千克",
+    }
+    for idx, block in enumerate(blocks):
+        line = preview["commodityLines"][idx] if idx < len(preview["commodityLines"]) else None
+        for marker_name, ref in block.items():
+            set_cell(sheet_root, ref, field_values[marker_name](line) if line else "")
+        if line and red_style_id is not None:
+            if "商品编号" in block:
+                flag_text_cell(sheet_root, block["商品编号"], line["hsCode"], red_style_id)
+            if "商品名称" in block:
+                flag_text_cell(sheet_root, block["商品名称"], line["goodsName"], red_style_id)
+            if "数量" in block:
+                flag_number_cell(sheet_root, block["数量"], line["quantity"], red_style_id, block.get("数量单位"))
+            if "金额" in block:
+                flag_number_cell(sheet_root, block["金额"], line["amount"], red_style_id)
+            if "币制" in block:
+                flag_text_cell(sheet_root, block["币制"], line["currency"], red_style_id)
+            if "净重" in block:
+                flag_number_cell(sheet_root, block["净重"], line["netWeight"], red_style_id, block.get("净重单位"))
+
+    subtotal_values = {
+        "合计标签": "Sub Total",
+        "合计数量": preview["totals"]["quantity"],
+        "合计数量单位": "个",
+        "合计金额": preview["totals"]["amount"],
+        "合计币制": preview["totals"]["currency"],
+        "合计净重": preview["netWeight"],
+        "合计净重单位": "千克",
+    }
+    for marker_name, value in subtotal_values.items():
+        ref = set_marker_value(sheet_root, markers, marker_name, value)
+        if red_style_id is not None and ref:
+            if marker_name in ("合计数量", "合计金额", "合计净重"):
+                flag_number_cell(sheet_root, ref, value, red_style_id)
+            elif marker_name == "合计币制":
+                flag_text_cell(sheet_root, ref, value, red_style_id)
+
+
 def ensure_red_bold_style(styles_xml):
     root = ET.fromstring(styles_xml)
     fonts = root.find(f"{{{NS_MAIN}}}fonts")
@@ -2007,6 +2189,7 @@ def generate_workbook(preview):
         workbook = ET.fromstring(zin.read("xl/workbook.xml"))
         rels = ET.fromstring(zin.read("xl/_rels/workbook.xml.rels"))
         content_types = ET.fromstring(zin.read("[Content_Types].xml"))
+        shared_strings = zip_shared_strings(zin)
         red_style_id = None
         rel_map = {rel.attrib["Id"]: rel.attrib["Target"] for rel in rels}
         sheets = {}
@@ -2018,71 +2201,78 @@ def generate_workbook(preview):
         main_path = sheets.get("Sheet1") or next(iter(sheets.values()))
         main_root = ET.fromstring(zin.read(main_path))
         unhide_rows(main_root)
+        template_markers = find_template_markers(main_root, shared_strings)
 
-        values = {
-            "C3": "91320594762449680U",
-            "A4": "凯斯库汽车部件（苏州）有限公司3205240783",
-            "G4": preview.get("exportDateSerial") or "",
-            "A6": preview["consignee"],
-            "E6": preview.get("transportMode") or "",
-            "C7": "91320594762449680U",
-            "A8": "凯斯库汽车部件（苏州）有限公司3205240783",
-            "E8": "一般",
-            "G8": "101",
-            "A10": preview["contractNo"],
-            "E10": preview.get("tradeCountry") or "",
-            "G10": preview.get("destinationCountry") or "",
-            "O10": "上海",
-            "A12": preview["packageKind"],
-            "E12": preview["packageCount"],
-            "F12": preview["grossWeight"],
-            "G12": preview["netWeight"],
-            "J12": preview["tradeTerm"],
-        }
-        for ref, value in values.items():
-            set_cell(main_root, ref, value)
-        flag_number_cell(main_root, "E12", preview["packageCount"], red_style_id)
-        flag_number_cell(main_root, "F12", preview["grossWeight"], red_style_id)
-        flag_number_cell(main_root, "G12", preview["netWeight"], red_style_id)
+        if template_markers.get("合同协议号") or template_markers.get("商品项号"):
+            fill_marker_template(main_root, template_markers, preview, red_style_id)
+        else:
+            values = {
+                "C3": "91320594762449680U",
+                "A4": "凯斯库汽车部件（苏州）有限公司3205240783",
+                "G4": preview.get("exportDateSerial") or "",
+                "A6": preview["consignee"],
+                "E6": preview.get("transportMode") or "",
+                "C7": "91320594762449680U",
+                "A8": "凯斯库汽车部件（苏州）有限公司3205240783",
+                "E8": "一般",
+                "G8": "101",
+                "A10": preview["contractNo"],
+                "E10": preview.get("tradeCountry") or "",
+                "G10": preview.get("destinationCountry") or "",
+                "O10": "上海",
+                "A12": preview["packageKind"],
+                "E12": preview["packageCount"],
+                "F12": preview["grossWeight"],
+                "G12": preview["netWeight"],
+                "J12": preview["tradeTerm"],
+            }
+            for ref, value in values.items():
+                set_cell(main_root, ref, value)
+            flag_number_cell(main_root, "E12", preview["packageCount"], red_style_id)
+            flag_number_cell(main_root, "F12", preview["grossWeight"], red_style_id)
+            flag_number_cell(main_root, "G12", preview["netWeight"], red_style_id)
 
-        for row in range(18, 75):
-            for col in ("A", "B", "D", "G", "H", "J", "K", "L", "M", "O", "R"):
-                clear_cell(main_root, f"{col}{row}")
+            line_start, subtotal_row, line_rows = declaration_sheet_layout(main_root, shared_strings)
+            if len(preview["commodityLines"]) > len(line_rows):
+                raise ValueError(f"报关单模板商品明细行不足：模板可填写 {len(line_rows)} 行，当前需要 {len(preview['commodityLines'])} 行")
 
-        line_rows = [18 + i * 3 for i in range(19)]
-        for line, row_num in zip(preview["commodityLines"], line_rows):
-            set_cell(main_root, f"A{row_num}", line["itemNo"])
-            set_cell(main_root, f"B{row_num}", line["hsCode"])
-            set_cell(main_root, f"D{row_num}", line["goodsName"])
-            set_cell(main_root, f"G{row_num}", line["quantity"])
-            set_cell(main_root, f"H{row_num}", "个")
-            set_cell(main_root, f"J{row_num}", line["amount"])
-            set_cell(main_root, f"K{row_num}", line["currency"])
-            set_cell(main_root, f"L{row_num}", preview["originCountry"])
-            set_cell(main_root, f"M{row_num}", preview["destinationCountry"])
-            set_cell(main_root, f"O{row_num}", preview["domesticSource"])
-            set_cell(main_root, f"R{row_num}", "照章征税")
-            set_cell(main_root, f"B{row_num + 1}", line["brand"])
-            set_cell(main_root, f"G{row_num + 1}", line["netWeight"])
-            set_cell(main_root, f"H{row_num + 1}", "千克")
-            flag_text_cell(main_root, f"B{row_num}", line["hsCode"], red_style_id)
-            flag_text_cell(main_root, f"D{row_num}", line["goodsName"], red_style_id)
-            flag_number_cell(main_root, f"G{row_num}", line["quantity"], red_style_id, f"H{row_num}")
-            flag_number_cell(main_root, f"J{row_num}", line["amount"], red_style_id)
-            flag_text_cell(main_root, f"K{row_num}", line["currency"], red_style_id)
-            flag_number_cell(main_root, f"G{row_num + 1}", line["netWeight"], red_style_id, f"H{row_num + 1}")
+            for row in range(line_start, subtotal_row + 2):
+                for col in ("A", "B", "D", "G", "H", "J", "K", "L", "M", "O", "R"):
+                    clear_cell(main_root, f"{col}{row}")
 
-        set_cell(main_root, "A75", "Sub Total")
-        set_cell(main_root, "G75", preview["totals"]["quantity"])
-        set_cell(main_root, "H75", "个")
-        set_cell(main_root, "J75", preview["totals"]["amount"])
-        set_cell(main_root, "K75", preview["totals"]["currency"])
-        set_cell(main_root, "G76", preview["netWeight"])
-        set_cell(main_root, "H76", "千克")
-        flag_number_cell(main_root, "G75", preview["totals"]["quantity"], red_style_id, "H75")
-        flag_number_cell(main_root, "J75", preview["totals"]["amount"], red_style_id)
-        flag_text_cell(main_root, "K75", preview["totals"]["currency"], red_style_id)
-        flag_number_cell(main_root, "G76", preview["netWeight"], red_style_id, "H76")
+            for line, row_num in zip(preview["commodityLines"], line_rows):
+                set_cell(main_root, f"A{row_num}", line["itemNo"])
+                set_cell(main_root, f"B{row_num}", line["hsCode"])
+                set_cell(main_root, f"D{row_num}", line["goodsName"])
+                set_cell(main_root, f"G{row_num}", line["quantity"])
+                set_cell(main_root, f"H{row_num}", "个")
+                set_cell(main_root, f"J{row_num}", line["amount"])
+                set_cell(main_root, f"K{row_num}", line["currency"])
+                set_cell(main_root, f"L{row_num}", preview["originCountry"])
+                set_cell(main_root, f"M{row_num}", preview["destinationCountry"])
+                set_cell(main_root, f"O{row_num}", preview["domesticSource"])
+                set_cell(main_root, f"R{row_num}", "照章征税")
+                set_cell(main_root, f"B{row_num + 1}", line["brand"])
+                set_cell(main_root, f"G{row_num + 1}", line["netWeight"])
+                set_cell(main_root, f"H{row_num + 1}", "千克")
+                flag_text_cell(main_root, f"B{row_num}", line["hsCode"], red_style_id)
+                flag_text_cell(main_root, f"D{row_num}", line["goodsName"], red_style_id)
+                flag_number_cell(main_root, f"G{row_num}", line["quantity"], red_style_id, f"H{row_num}")
+                flag_number_cell(main_root, f"J{row_num}", line["amount"], red_style_id)
+                flag_text_cell(main_root, f"K{row_num}", line["currency"], red_style_id)
+                flag_number_cell(main_root, f"G{row_num + 1}", line["netWeight"], red_style_id, f"H{row_num + 1}")
+
+            set_cell(main_root, f"A{subtotal_row}", "Sub Total")
+            set_cell(main_root, f"G{subtotal_row}", preview["totals"]["quantity"])
+            set_cell(main_root, f"H{subtotal_row}", "个")
+            set_cell(main_root, f"J{subtotal_row}", preview["totals"]["amount"])
+            set_cell(main_root, f"K{subtotal_row}", preview["totals"]["currency"])
+            set_cell(main_root, f"G{subtotal_row + 1}", preview["netWeight"])
+            set_cell(main_root, f"H{subtotal_row + 1}", "千克")
+            flag_number_cell(main_root, f"G{subtotal_row}", preview["totals"]["quantity"], red_style_id, f"H{subtotal_row}")
+            flag_number_cell(main_root, f"J{subtotal_row}", preview["totals"]["amount"], red_style_id)
+            flag_text_cell(main_root, f"K{subtotal_row}", preview["totals"]["currency"], red_style_id)
+            flag_number_cell(main_root, f"G{subtotal_row + 1}", preview["netWeight"], red_style_id, f"H{subtotal_row + 1}")
 
         update_worksheet_dimension(main_root)
         modified = {main_path: serialize_excel_xml(main_root)}
