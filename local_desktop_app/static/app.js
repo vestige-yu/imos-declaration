@@ -17,6 +17,15 @@ const adminForm = document.querySelector("#adminForm");
 const adminResult = document.querySelector("#adminResult");
 const historyList = document.querySelector("#historyList");
 const refreshHistoryBtn = document.querySelector("#refreshHistoryBtn");
+const historySearchForm = document.querySelector("#historySearchForm");
+const historyStart = document.querySelector("#historyStart");
+const historyEnd = document.querySelector("#historyEnd");
+const historySearchList = document.querySelector("#historySearchList");
+const historySearchSummary = document.querySelector("#historySearchSummary");
+const historyPager = document.querySelector("#historyPager");
+
+let historySearchPage = 1;
+let historySearchHasRun = false;
 
 documentsInput.addEventListener("change", event => {
   const files = Array.from(event.target.files || []);
@@ -78,7 +87,7 @@ function downloadLink(record, kind, label, disabled = false) {
   return `<a href="/api/history/${encodeURIComponent(record.id)}/download?kind=${encodeURIComponent(kind)}">${escapeHtml(label)}</a>`;
 }
 
-function renderHistory(records) {
+function renderRecentHistory(records) {
   if (!records.length) {
     historyList.innerHTML = `<div class="empty-state">暂无历史记录</div>`;
     return;
@@ -110,13 +119,87 @@ function renderHistory(records) {
 
 async function loadHistory() {
   try {
-    const response = await fetch("/api/history");
+    const response = await fetch("/api/history?limit=5");
     const data = await response.json();
     if (!data.ok) throw new Error(data.error || "历史记录读取失败");
-    renderHistory(data.history || []);
+    renderRecentHistory(data.history || []);
   } catch (error) {
     historyList.innerHTML = `<div class="empty-state">${escapeHtml(error.message)}</div>`;
   }
+}
+
+function renderHistorySearch(records) {
+  if (!records.length) {
+    historySearchList.innerHTML = `<div class="empty-state">该时间段内没有上传记录</div>`;
+    return;
+  }
+  historySearchList.innerHTML = records.map(record => `
+    <article class="history-item history-query-item">
+      <div class="history-main">
+        <strong>${escapeHtml(record.contractNo || "未命名记录")}</strong>
+        <span>${escapeHtml(record.createdAt)}</span>
+      </div>
+      <div class="history-files">
+        <span>Invoice：${escapeHtml(record.invoiceName || "-")}</span>
+        <span>Packing：${escapeHtml(record.packingName || "-")}</span>
+        ${record.outputName ? `<span>报关单：${escapeHtml(record.outputName)}</span>` : ""}
+      </div>
+    </article>
+  `).join("");
+}
+
+function renderHistoryPager(pagination) {
+  if (!pagination || pagination.total <= pagination.limit) {
+    historyPager.hidden = true;
+    historyPager.innerHTML = "";
+    return;
+  }
+  const page = pagination.page || 1;
+  const totalPages = pagination.totalPages || 1;
+  historyPager.hidden = false;
+  historyPager.innerHTML = `
+    <button class="secondary" type="button" data-history-page="${page - 1}" ${page <= 1 ? "disabled" : ""}>上一页</button>
+    <span>第 ${escapeHtml(page)} / ${escapeHtml(totalPages)} 页</span>
+    <button class="secondary" type="button" data-history-page="${page + 1}" ${page >= totalPages ? "disabled" : ""}>下一页</button>
+  `;
+}
+
+async function runHistorySearch(page = 1) {
+  const params = new URLSearchParams();
+  if (historyStart.value) params.set("start", historyStart.value);
+  if (historyEnd.value) params.set("end", historyEnd.value);
+  params.set("limit", "50");
+  params.set("page", String(page));
+  historySearchPage = page;
+  historySearchHasRun = true;
+  historySearchSummary.textContent = "查询中";
+  historySearchList.innerHTML = `<div class="empty-state">查询中</div>`;
+  historyPager.hidden = true;
+  try {
+    const response = await fetch(`/api/history?${params.toString()}`);
+    const data = await response.json();
+    if (!data.ok) throw new Error(data.error || "历史记录查询失败");
+    const pagination = data.pagination || {};
+    const total = pagination.total ?? data.history?.length ?? 0;
+    const pageNo = pagination.page || page;
+    const totalPages = pagination.totalPages || 1;
+    const count = data.history?.length || 0;
+    const startText = data.filters?.start || "不限开始时间";
+    const endText = data.filters?.end || "不限结束时间";
+    historySearchPage = pageNo;
+    historySearchSummary.textContent = `${startText} 至 ${endText}，共 ${total} 条；第 ${pageNo} / ${totalPages} 页，本页 ${count} 条`;
+    renderHistorySearch(data.history || []);
+    renderHistoryPager(pagination);
+  } catch (error) {
+    historySearchSummary.textContent = "查询失败";
+    historySearchList.innerHTML = `<div class="empty-state">${escapeHtml(error.message)}</div>`;
+    historyPager.hidden = true;
+  }
+}
+
+async function searchHistory(event) {
+  event.preventDefault();
+  await runHistorySearch(1);
 }
 
 function renderPreview(preview) {
@@ -224,6 +307,7 @@ previewToggle.addEventListener("click", () => {
 });
 
 refreshHistoryBtn.addEventListener("click", loadHistory);
+historySearchForm.addEventListener("submit", searchHistory);
 
 historyList.addEventListener("click", async event => {
   const button = event.target.closest("[data-delete]");
@@ -236,6 +320,9 @@ historyList.addEventListener("click", async event => {
     if (!data.ok) throw new Error(data.error || "删除失败");
     statusEl.textContent = "历史已删除";
     loadHistory();
+    if (historySearchHasRun) {
+      runHistorySearch(historySearchPage);
+    }
   } catch (error) {
     statusEl.textContent = "删除失败";
     alert(error.message);
@@ -261,6 +348,12 @@ adminForm.addEventListener("submit", async event => {
     statusEl.textContent = "上传失败";
     alert(error.message);
   }
+});
+
+historyPager.addEventListener("click", event => {
+  const button = event.target.closest("[data-history-page]");
+  if (!button || button.disabled) return;
+  runHistorySearch(Number(button.dataset.historyPage));
 });
 
 loadHistory();

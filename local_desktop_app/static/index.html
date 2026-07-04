@@ -73,11 +73,33 @@
 
       <section class="panel history-panel">
         <div class="panel-title">
-          <h2>历史记录</h2>
+          <h2>最近上传记录</h2>
           <button class="secondary" id="refreshHistoryBtn" type="button">刷新</button>
         </div>
         <div class="history-list" id="historyList">
           <div class="empty-state">暂无历史记录</div>
+        </div>
+      </section>
+
+      <section class="panel history-panel">
+        <div class="panel-title">
+          <h2>历史上传记录</h2>
+        </div>
+        <form class="history-search" id="historySearchForm">
+          <label>
+            <span>开始时间</span>
+            <input id="historyStart" name="start" type="datetime-local">
+          </label>
+          <label>
+            <span>结束时间</span>
+            <input id="historyEnd" name="end" type="datetime-local">
+          </label>
+          <button class="secondary" type="submit">查询</button>
+        </form>
+        <div class="history-search-summary" id="historySearchSummary">请选择时间段查询</div>
+        <div class="history-pager" id="historyPager" hidden></div>
+        <div class="history-list" id="historySearchList">
+          <div class="empty-state">暂无查询结果</div>
         </div>
       </section>
 

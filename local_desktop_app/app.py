@@ -3,6 +3,7 @@ import cgi
 import html
 import io
 import json
+import math
 import os
 import posixpath
 import random
@@ -195,6 +196,20 @@ def row_to_history(row, include_preview=False):
         result["preview"] = json_loads(row["preview_json"], {})
         result["recognizedFiles"] = json_loads(row["recognized_json"], [])
     return result
+
+
+def normalize_history_datetime(value, end_of_day=False):
+    text = safe_text(value).strip()
+    if not text:
+        return ""
+    text = urllib.parse.unquote(text).replace("T", " ")
+    if re.match(r"^\d{4}-\d{2}-\d{2}$", text):
+        return f"{text} {'23:59:59' if end_of_day else '00:00:00'}"
+    if re.match(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$", text):
+        return f"{text}:59" if end_of_day else f"{text}:00"
+    if re.match(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$", text):
+        return text
+    raise ValueError("历史查询时间格式不正确")
 
 
 def create_history_record(preview, invoice_file, packing_file, classifications, record_id=None):
@@ -2416,42 +2431,46 @@ class AppHandler(BaseHTTPRequestHandler):
         print(f"[{now_stamp()}] {self.address_string()} {fmt % args}")
 
     def do_GET(self):
-        parsed = urllib.parse.urlparse(self.path)
-        path = parsed.path
-        if path == "/":
-            self.serve_static("index.html")
-            return
-        if path == f"/u/{PUBLIC_TOKEN}":
-            self.serve_static("index.html")
-            return
-        if path == "/suri-admin":
-            self.redirect("/")
-            return
-        if path == f"/admin/{ADMIN_TOKEN}":
-            self.redirect("/suri-admin")
-            return
-        if path == "/favicon.ico":
-            self.send_response(204)
-            self.end_headers()
-            return
-        if path.startswith("/static/"):
-            self.serve_static(path[len("/static/"):])
-            return
-        if path.startswith("/download/"):
-            self.serve_download(path.rsplit("/", 1)[-1])
-            return
-        if path == "/api/history":
-            self.handle_history_list()
-            return
-        if path.startswith("/api/history/"):
-            parts = path.strip("/").split("/")
-            if len(parts) == 3:
-                self.handle_history_detail(parts[2])
+        try:
+            parsed = urllib.parse.urlparse(self.path)
+            path = parsed.path
+            if path == "/":
+                self.serve_static("index.html")
                 return
-            if len(parts) == 4 and parts[3] == "download":
-                self.handle_history_download(parts[2], urllib.parse.parse_qs(parsed.query))
+            if path == f"/u/{PUBLIC_TOKEN}":
+                self.serve_static("index.html")
                 return
-        self.send_error(HTTPStatus.NOT_FOUND, "Not found")
+            if path == "/suri-admin":
+                self.redirect("/")
+                return
+            if path == f"/admin/{ADMIN_TOKEN}":
+                self.redirect("/suri-admin")
+                return
+            if path == "/favicon.ico":
+                self.send_response(204)
+                self.end_headers()
+                return
+            if path.startswith("/static/"):
+                self.serve_static(path[len("/static/"):])
+                return
+            if path.startswith("/download/"):
+                self.serve_download(path.rsplit("/", 1)[-1])
+                return
+            if path == "/api/history":
+                self.handle_history_list(urllib.parse.parse_qs(parsed.query))
+                return
+            if path.startswith("/api/history/"):
+                parts = path.strip("/").split("/")
+                if len(parts) == 3:
+                    self.handle_history_detail(parts[2])
+                    return
+                if len(parts) == 4 and parts[3] == "download":
+                    self.handle_history_download(parts[2], urllib.parse.parse_qs(parsed.query))
+                    return
+            self.send_error(HTTPStatus.NOT_FOUND, "Not found")
+        except Exception as exc:
+            log_runtime_error("GET failed:\n" + traceback.format_exc())
+            json_response(self, 400, {"ok": False, "error": str(exc)})
 
     def do_POST(self):
         try:
@@ -2613,17 +2632,60 @@ class AppHandler(BaseHTTPRequestHandler):
         meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), "utf-8")
         json_response(self, 200, {"ok": True, "updated": updated, "active": meta})
 
-    def handle_history_list(self):
+    def handle_history_list(self, query=None):
         init_db()
+        query = query or {}
+        start_at = normalize_history_datetime((query.get("start") or [""])[0])
+        end_at = normalize_history_datetime((query.get("end") or [""])[0], end_of_day=True)
+        limit_raw = (query.get("limit") or ["5"])[0]
+        page_raw = (query.get("page") or ["1"])[0]
+        try:
+            limit = max(1, min(int(limit_raw), 50))
+        except ValueError:
+            limit = 5
+        try:
+            page = max(1, int(page_raw))
+        except ValueError:
+            page = 1
+        where = []
+        params = []
+        if start_at:
+            where.append("created_at >= ?")
+            params.append(start_at)
+        if end_at:
+            where.append("created_at <= ?")
+            params.append(end_at)
+        if start_at and end_at and start_at > end_at:
+            raise ValueError("开始时间不能晚于结束时间")
+        where_sql = f"WHERE {' AND '.join(where)}" if where else ""
         with db_connect() as conn:
+            total = conn.execute(
+                f"SELECT COUNT(*) FROM history_records {where_sql}",
+                params,
+            ).fetchone()[0]
+            total_pages = max(1, math.ceil(total / limit))
+            page = min(page, total_pages)
+            offset = (page - 1) * limit
             rows = conn.execute(
-                """
+                f"""
                 SELECT * FROM history_records
+                 {where_sql}
                  ORDER BY datetime(created_at) DESC, created_at DESC
-                 LIMIT 200
-                """
+                 LIMIT ? OFFSET ?
+                """,
+                (*params, limit, offset),
             ).fetchall()
-        json_response(self, 200, {"ok": True, "history": [row_to_history(row) for row in rows]})
+        json_response(self, 200, {
+            "ok": True,
+            "history": [row_to_history(row) for row in rows],
+            "filters": {"start": start_at, "end": end_at, "limit": limit, "page": page},
+            "pagination": {
+                "page": page,
+                "limit": limit,
+                "total": total,
+                "totalPages": total_pages,
+            },
+        })
 
     def handle_history_detail(self, record_id):
         init_db()

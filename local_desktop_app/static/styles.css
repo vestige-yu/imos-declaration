@@ -406,6 +406,58 @@ tbody tr:hover {
   gap: 10px;
 }
 
+.history-search {
+  display: grid;
+  grid-template-columns: minmax(210px, 1fr) minmax(210px, 1fr) auto;
+  gap: 10px;
+  align-items: end;
+  margin-bottom: 10px;
+}
+
+.history-search label {
+  display: grid;
+  gap: 6px;
+}
+
+.history-search span,
+.history-search-summary {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.history-search input {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 12px;
+  color: var(--ink);
+  font: inherit;
+}
+
+.history-search-summary {
+  margin-bottom: 10px;
+}
+
+.history-pager {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  justify-content: flex-end;
+  margin-bottom: 10px;
+}
+
+.history-pager span {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.history-pager button:disabled {
+  cursor: not-allowed;
+  opacity: .45;
+}
+
 .history-item {
   display: grid;
   grid-template-columns: minmax(260px, 1fr) auto auto;
@@ -417,9 +469,14 @@ tbody tr:hover {
   padding: 12px;
 }
 
+.history-query-item {
+  grid-template-columns: minmax(220px, .7fr) minmax(260px, 1.3fr);
+}
+
 .history-main,
 .history-meta,
-.history-actions {
+.history-actions,
+.history-files {
   min-width: 0;
 }
 
@@ -444,6 +501,17 @@ tbody tr:hover {
   gap: 8px;
   align-items: center;
   white-space: nowrap;
+}
+
+.history-files {
+  display: grid;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.history-files span {
+  overflow-wrap: anywhere;
 }
 
 .history-warning {
@@ -527,6 +595,7 @@ pre {
   .maintenance-grid,
   .summary-grid,
   .details,
+  .history-search,
   .history-item {
     grid-template-columns: 1fr;
   }
