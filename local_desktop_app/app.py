@@ -22,6 +22,7 @@ import urllib.parse
 import uuid
 import webbrowser
 import zipfile
+from contextlib import contextmanager
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -172,8 +173,18 @@ def db_connect():
     return conn
 
 
+@contextmanager
+def db_session():
+    conn = db_connect()
+    try:
+        with conn:
+            yield conn
+    finally:
+        conn.close()
+
+
 def init_db():
-    with db_connect() as conn:
+    with db_session() as conn:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS history_records (
@@ -274,7 +285,7 @@ def create_history_record(preview, invoice_file, packing_file, classifications, 
         "preview": str(preview_path),
         "output": "",
     }
-    with db_connect() as conn:
+    with db_session() as conn:
         conn.execute(
             """
             INSERT INTO history_records (
@@ -305,7 +316,7 @@ def update_history_output(record_id, generated_path, output_name, preview):
     record_dir.mkdir(parents=True, exist_ok=True)
     output_path = record_dir / "output.xlsx"
     shutil.copy2(generated_path, output_path)
-    with db_connect() as conn:
+    with db_session() as conn:
         row = conn.execute("SELECT file_paths_json FROM history_records WHERE id = ?", (record_id,)).fetchone()
         file_paths = json_loads(row["file_paths_json"], {}) if row else {}
         file_paths["output"] = str(output_path)
@@ -3300,7 +3311,7 @@ class AppHandler(BaseHTTPRequestHandler):
         if start_at and end_at and start_at > end_at:
             raise ValueError("开始时间不能晚于结束时间")
         where_sql = f"WHERE {' AND '.join(where)}" if where else ""
-        with db_connect() as conn:
+        with db_session() as conn:
             total = conn.execute(
                 f"SELECT COUNT(*) FROM history_records {where_sql}",
                 params,
@@ -3331,7 +3342,7 @@ class AppHandler(BaseHTTPRequestHandler):
 
     def handle_history_detail(self, record_id):
         init_db()
-        with db_connect() as conn:
+        with db_session() as conn:
             row = conn.execute("SELECT * FROM history_records WHERE id = ?", (record_id,)).fetchone()
         if not row:
             raise ValueError("未找到历史记录")
@@ -3341,7 +3352,7 @@ class AppHandler(BaseHTTPRequestHandler):
         kind = (query.get("kind") or [""])[0]
         if kind not in {"invoice", "packing", "output", "preview"}:
             raise ValueError("下载类型不正确")
-        with db_connect() as conn:
+        with db_session() as conn:
             row = conn.execute("SELECT * FROM history_records WHERE id = ?", (record_id,)).fetchone()
         if not row:
             raise ValueError("未找到历史记录")
@@ -3373,7 +3384,7 @@ class AppHandler(BaseHTTPRequestHandler):
 
     def handle_history_delete(self, record_id):
         init_db()
-        with db_connect() as conn:
+        with db_session() as conn:
             row = conn.execute("SELECT * FROM history_records WHERE id = ?", (record_id,)).fetchone()
             if not row:
                 raise ValueError("未找到历史记录")

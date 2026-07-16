@@ -19,6 +19,7 @@ import urllib.parse
 import uuid
 import webbrowser
 import zipfile
+from contextlib import contextmanager
 from datetime import date, datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -139,8 +140,18 @@ def db_connect() -> sqlite3.Connection:
     return connection
 
 
+@contextmanager
+def db_session():
+    connection = db_connect()
+    try:
+        with connection:
+            yield connection
+    finally:
+        connection.close()
+
+
 def init_db() -> None:
-    with db_connect() as connection:
+    with db_session() as connection:
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS merge_history (
@@ -393,7 +404,7 @@ def create_preview_record(
             "preview": str(preview_path),
             "output": "",
         }
-        with db_connect() as connection:
+        with db_session() as connection:
             connection.execute(
                 """
                 INSERT INTO merge_history (
@@ -432,7 +443,7 @@ def create_preview_record(
 
 def _history_row(record_id: str) -> sqlite3.Row:
     init_db()
-    with db_connect() as connection:
+    with db_session() as connection:
         row = connection.execute(
             "SELECT * FROM merge_history WHERE id = ?",
             (record_id,),
@@ -492,7 +503,7 @@ def generate_history_record(record_id: str) -> tuple[Path, str, dict[str, Any]]:
 
     output_name = _output_filename(row)
     paths["output"] = str(output_path)
-    with db_connect() as connection:
+    with db_session() as connection:
         connection.execute(
             """
             UPDATE merge_history
@@ -1008,7 +1019,7 @@ class AppHandler(BaseHTTPRequestHandler):
             if conditions
             else ""
         )
-        with db_connect() as connection:
+        with db_session() as connection:
             total = connection.execute(
                 f"SELECT COUNT(*) FROM merge_history {where_sql}",
                 params,
@@ -1110,7 +1121,7 @@ class AppHandler(BaseHTTPRequestHandler):
 
     def handle_history_delete(self, record_id: str) -> None:
         _history_row(record_id)
-        with db_connect() as connection:
+        with db_session() as connection:
             connection.execute(
                 "DELETE FROM merge_history WHERE id = ?",
                 (record_id,),
