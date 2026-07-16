@@ -505,6 +505,35 @@ def excel_serial_from_yyyymmdd(text):
     return (_dt.date(year, month, day) - base).days
 
 
+def excel_serial_from_date_value(value):
+    import datetime as _dt
+
+    if isinstance(value, (int, float)):
+        number = float(value)
+        return number if 1 <= number <= 100000 else ""
+
+    text = safe_text(value)
+    if not text:
+        return ""
+    if re.fullmatch(r"\d+(?:\.\d+)?", text):
+        number = float(text)
+        return number if 1 <= number <= 100000 else ""
+    compact = re.sub(r"\s+", "", text)
+    for date_format in (
+        "%Y-%m-%d",
+        "%Y/%m/%d",
+        "%m/%d/%Y",
+        "%m-%d-%Y",
+        "%d/%m/%Y",
+    ):
+        try:
+            parsed = _dt.datetime.strptime(compact, date_format).date()
+            return (parsed - _dt.date(1899, 12, 30)).days
+        except ValueError:
+            continue
+    return excel_serial_from_yyyymmdd(compact)
+
+
 def adjacent_value(row, idx):
     text = safe_text(row[idx]) if idx < len(row) else ""
     if ":" in text:
@@ -643,6 +672,7 @@ class XlsWorkbook:
         self.data = data
         self.workbook_stream = self._read_workbook_stream()
         self.shared_strings = self._read_sst()
+        self.sheet_metadata = self._read_sheet_metadata()
         self.sheets = self._read_sheets()
 
     @classmethod
@@ -848,6 +878,21 @@ class XlsWorkbook:
         raw = payload[offset:offset + char_count * width]
         return raw.decode("utf-16le" if flags & 0x01 else "latin1", "ignore")
 
+    def _read_sheet_metadata(self):
+        sheets = []
+        for rec_type, payload in self._records():
+            if rec_type != 0x0085 or len(payload) < 8:
+                continue
+            name_length = payload[6]
+            flags = payload[7]
+            width = 2 if flags & 0x01 else 1
+            raw = payload[8:8 + name_length * width]
+            sheets.append({
+                "name": raw.decode("utf-16le" if width == 2 else "latin1", "ignore"),
+                "state": "visible" if payload[4] == 0 else "hidden",
+            })
+        return sheets
+
     def _read_sheets(self):
         sheets = []
         current = None
@@ -921,6 +966,7 @@ class XlsxBook:
         self.path = Path(path)
         self.zip = zipfile.ZipFile(self.path)
         self.shared_strings = self._shared_strings()
+        self.sheet_states = {}
         self.sheet_map = self._sheet_paths()
 
     def close(self):
@@ -940,7 +986,9 @@ class XlsxBook:
         for sheet in workbook.findall(f"{{{NS_MAIN}}}sheets/{{{NS_MAIN}}}sheet"):
             rid = sheet.attrib[f"{{{NS_REL}}}id"]
             target = rel_map[rid].lstrip("/")
-            result[sheet.attrib["name"]] = "xl/" + target if not target.startswith("xl/") else target
+            name = sheet.attrib["name"]
+            result[name] = "xl/" + target if not target.startswith("xl/") else target
+            self.sheet_states[name] = sheet.attrib.get("state", "visible")
         return result
 
     def sheet_values(self, sheet_name):
@@ -983,26 +1031,49 @@ class XlsxBook:
         return [[grid.get((r, c), "") for c in range(max_col + 1)] for r in range(max_row + 1)]
 
 
-def read_spreadsheet(path):
+def read_spreadsheet_entries(path):
     suffix = Path(path).suffix.lower()
     if suffix == ".xls":
         workbook = XlsWorkbook.load(path)
-        return workbook.sheets
+        return [
+            {
+                "name": (
+                    workbook.sheet_metadata[idx]["name"]
+                    if idx < len(workbook.sheet_metadata)
+                    else f"Sheet {idx + 1}"
+                ),
+                "state": (
+                    workbook.sheet_metadata[idx]["state"]
+                    if idx < len(workbook.sheet_metadata)
+                    else "visible"
+                ),
+                "cells": sheet,
+            }
+            for idx, sheet in enumerate(workbook.sheets)
+        ]
     if suffix == ".xlsx":
         book = XlsxBook(path)
         try:
             return [
                 {
-                    (r, c): value
-                    for r, row in enumerate(book.rows(name))
-                    for c, value in enumerate(row)
-                    if safe_text(value)
+                    "name": name,
+                    "state": book.sheet_states.get(name, "visible"),
+                    "cells": {
+                        (r, c): value
+                        for r, row in enumerate(book.rows(name))
+                        for c, value in enumerate(row)
+                        if safe_text(value)
+                    },
                 }
                 for name in book.sheet_map
             ]
         finally:
             book.close()
     raise ValueError("仅支持 .xls 或 .xlsx 文件")
+
+
+def read_spreadsheet(path):
+    return [entry["cells"] for entry in read_spreadsheet_entries(path)]
 
 
 def matrix_from_sheet(sheet):
@@ -1211,7 +1282,8 @@ def parse_invoice(path):
     trade_term = "CPT"
     transport_mode = normalize_transport_mode(Path(path).name)
     currency = "USD"
-    export_date = excel_serial_from_yyyymmdd(Path(path).name)
+    filename_date = excel_serial_from_yyyymmdd(Path(path).name)
+    pickup_date = ""
     for row in invoice_sheet[:30]:
         for idx, value in enumerate(row):
             text = safe_text(value)
@@ -1231,6 +1303,8 @@ def parse_invoice(path):
                 if not candidate and idx + 1 < len(row):
                     candidate = row[idx + 1]
                 transport_mode = normalize_transport_mode(candidate) or transport_mode
+            if re.search(r"pick\s*up\s*date|pickup\s*date", text, re.I):
+                pickup_date = excel_serial_from_date_value(adjacent_value(row, idx)) or pickup_date
             if text in ("USD", "EUR", "CNY"):
                 currency = text
     consignee = (
@@ -1293,14 +1367,14 @@ def parse_invoice(path):
         "tradeTerm": trade_term or "CPT",
         "transportMode": transport_mode,
         "currency": currency or "USD",
-        "exportDateSerial": export_date,
+        "exportDateSerial": pickup_date or filename_date,
         "items": items,
         "anomalies": anomalies,
     }
 
 
-def parse_packing(path):
-    sheets = [matrix_from_sheet(s) for s in read_spreadsheet(path)]
+def parse_packing(path, expected_contract_no=""):
+    entries = read_spreadsheet_entries(path)
     package_count = 0
     gross_weight = 0.0
     net_weight = 0.0
@@ -1308,19 +1382,49 @@ def parse_packing(path):
     part_gross_weights = {}
     export_date = excel_serial_from_yyyymmdd(Path(path).name)
     anomalies = []
+    parser_warnings = []
+    expected_key = re.sub(r"\s+", "", safe_text(expected_contract_no)).upper()
+    candidates = []
 
-    for sheet in sheets:
-        for row in sheet:
-            for value in row:
-                text = safe_text(value)
-                match = re.search(r"\b(\d+)\s*(pallet|plt|carton|ctn|托盘|箱)s?\b", text, re.I)
-                if match:
-                    package_count = max(package_count, int(match.group(1)))
-
-    for sheet_idx, sheet in enumerate(sheets):
-        header_idx = find_header_row(sheet, [("qad pn", "part no"), ("qty", "quantity"), ("n.w", "nw")])
+    for sheet_idx, entry in enumerate(entries):
+        sheet = matrix_from_sheet(entry["cells"])
+        header_idx = find_header_row(
+            sheet,
+            [
+                ("qad pn", "part no", "fg pn", "fg_pn", "fgpn"),
+                ("qty", "quantity"),
+                ("n.w", "nw"),
+                ("g.w", "gw"),
+            ],
+        )
         if header_idx is None:
             continue
+        sheet_text = re.sub(
+            r"\s+",
+            "",
+            " ".join(safe_text(value) for row in sheet for value in row),
+        ).upper()
+        candidates.append({
+            "index": sheet_idx,
+            "name": entry.get("name") or f"Sheet {sheet_idx + 1}",
+            "state": entry.get("state", "visible"),
+            "sheet": sheet,
+            "header": header_idx,
+            "contractMatch": bool(expected_key and expected_key in sheet_text),
+        })
+
+    if expected_key and any(candidate["contractMatch"] for candidate in candidates):
+        candidates = [candidate for candidate in candidates if candidate["contractMatch"]]
+    visible_candidates = [candidate for candidate in candidates if candidate["state"] == "visible"]
+    if visible_candidates:
+        candidates = visible_candidates
+
+    selected = candidates[0] if candidates else None
+    source_sheet = selected["name"] if selected else ""
+    if selected:
+        sheet_idx = selected["index"]
+        sheet = selected["sheet"]
+        header_idx = selected["header"]
         header = normalized_header(sheet[header_idx])
 
         def find_col(*terms):
@@ -1336,52 +1440,54 @@ def parse_packing(path):
                         return col
             return None
 
-        part_col = find_col("qad pn")
+        part_col = find_col("qad pn", "part no", "fg pn", "fg_pn", "fgpn")
         qty_col = find_col("qty", "quantity")
         net_col = find_col("n.w.(kg)", "n.w", "nw")
         gross_col = find_col("g.w.(kg)", "g.w", "gw")
-        pallet_col = find_col("pallet")
-        if part_col is None or qty_col is None or net_col is None or gross_col is None:
-            continue
+        pallet_col = find_col("pallet item", "pallet no", "pallet")
 
+        required_columns = {
+            "料号": part_col,
+            "数量": qty_col,
+            "净重": net_col,
+            "毛重": gross_col,
+        }
+        missing_columns = [name for name, col in required_columns.items() if col is None]
+        if missing_columns:
+            parser_warnings.append(
+                f"Packing list 工作表 {source_sheet} 缺少必要列：{'、'.join(missing_columns)}，请复核"
+            )
+            selected = None
+
+    if selected:
         pallets = set()
         summed_net_weight = 0.0
         summed_gross_weight = 0.0
+        total_net_weight = 0.0
+        total_gross_weight = 0.0
         for row_idx, row in enumerate(sheet[header_idx + 1:], header_idx + 1):
             label = " ".join(safe_text(v).lower() for v in row)
             if "total" in label:
-                package_count = int(to_number(row[pallet_col])) if pallet_col is not None and pallet_col < len(row) else package_count
+                total_packages = (
+                    int(to_number(row[pallet_col]))
+                    if pallet_col is not None and pallet_col < len(row) and to_number(row[pallet_col])
+                    else 0
+                )
+                if total_packages:
+                    package_count = total_packages
                 total_net = to_number(row[net_col]) if net_col < len(row) else 0
                 total_gross = to_number(row[gross_col]) if gross_col < len(row) else 0
                 if total_net:
-                    net_weight = round2(total_net)
+                    total_net_weight = round2(total_net)
                 if total_gross:
-                    gross_weight = round2(total_gross)
+                    total_gross_weight = round2(total_gross)
                 continue
 
-            if max(part_col, qty_col, net_col) >= len(row):
+            if max(part_col, qty_col, net_col, gross_col) >= len(row):
                 continue
             part = safe_text(row[part_col])
             quantity = to_number(row[qty_col])
-            summary_pallet_count = (
-                int(to_number(row[pallet_col]))
-                if pallet_col is not None
-                and pallet_col < len(row)
-                and not part
-                and to_number(row[pallet_col])
-                and net_col < len(row)
-                and gross_col < len(row)
-                and (to_number(row[net_col]) or to_number(row[gross_col]))
-                else 0
-            )
-            if summary_pallet_count:
-                package_count = max(package_count, summary_pallet_count)
-                if not net_weight and net_col < len(row) and to_number(row[net_col]):
-                    net_weight = round2(to_number(row[net_col]))
-                if not gross_weight and gross_col < len(row) and to_number(row[gross_col]):
-                    gross_weight = round2(to_number(row[gross_col]))
-                continue
-            if quantity < 1 or not re.match(r"^\d{9,}-\w+", part):
+            if quantity < 1 or not part:
                 continue
             append_text_anomaly(anomalies, "Packing list", sheet_idx, row_idx, row, part_col, "QAD PN")
             append_numeric_anomaly(anomalies, "Packing list", sheet_idx, row_idx, row, qty_col, "Quantity", True)
@@ -1389,7 +1495,7 @@ def parse_packing(path):
             append_numeric_anomaly(anomalies, "Packing list", sheet_idx, row_idx, row, gross_col, "G.W.(KG)", True)
             part_key = normalize_part(part)
             item_net_weight = round2(to_number(row[net_col]))
-            item_gross_weight = round2(to_number(row[gross_col])) if gross_col < len(row) else 0
+            item_gross_weight = round2(to_number(row[gross_col]))
             part_weights[part_key] = round2(part_weights.get(part_key, 0) + item_net_weight)
             part_gross_weights[part_key] = round2(part_gross_weights.get(part_key, 0) + item_gross_weight)
             summed_net_weight += item_net_weight
@@ -1399,29 +1505,32 @@ def parse_packing(path):
                     pallets.add(int(number))
 
         if not package_count and pallets:
-            package_count = max(pallets)
-        if not net_weight and summed_net_weight:
-            net_weight = round2(summed_net_weight)
-        if not gross_weight and summed_gross_weight:
-            gross_weight = round2(summed_gross_weight)
-        if part_weights:
-            break
-
-    if not part_weights:
-        for sheet in sheets:
+            package_count = len(pallets)
+        if not package_count:
             for row in sheet:
-                line = " ".join(safe_text(v) for v in row)
-                if re.search(r"\btotal\b", line, re.I):
-                    numbers = [to_number(v, None) for v in row]
-                    numbers = [v for v in numbers if v is not None and v > 0]
-                    if len(numbers) >= 2:
-                        gross_weight = max(gross_weight, max(numbers))
-                        positives = sorted(numbers)
-                        net_weight = max(net_weight, positives[-2] if len(positives) > 1 else positives[-1])
                 for value in row:
-                    text = safe_text(value)
-                    if re.search(r"\b\d+\s*(pallet|plt|托盘)", text, re.I):
-                        package_count = max(package_count, int(re.search(r"\d+", text).group(0)))
+                    match = re.search(
+                        r"\b(\d+)\s*(pallet|plt|carton|ctn|托盘|箱)s?\b",
+                        safe_text(value),
+                        re.I,
+                    )
+                    if match:
+                        package_count = max(package_count, int(match.group(1)))
+
+        net_weight = total_net_weight or round2(summed_net_weight)
+        gross_weight = total_gross_weight or round2(summed_gross_weight)
+        if total_net_weight and summed_net_weight and abs(total_net_weight - round2(summed_net_weight)) > 0.5:
+            parser_warnings.append(
+                f"Packing list 工作表“{source_sheet}”明细净重 {round2(summed_net_weight)} "
+                f"与合计净重 {total_net_weight} 不一致"
+            )
+        if total_gross_weight and summed_gross_weight and abs(total_gross_weight - round2(summed_gross_weight)) > 0.5:
+            parser_warnings.append(
+                f"Packing list 工作表“{source_sheet}”明细毛重 {round2(summed_gross_weight)} "
+                f"与合计毛重 {total_gross_weight} 不一致"
+            )
+    else:
+        parser_warnings.append("Packing list 未找到同时包含料号、数量、净重和毛重的有效明细表")
 
     return {
         "packageCount": int(package_count) if package_count else "",
@@ -1431,6 +1540,8 @@ def parse_packing(path):
         "partGrossWeights": part_gross_weights,
         "exportDateSerial": export_date,
         "anomalies": anomalies,
+        "warnings": parser_warnings,
+        "sourceSheet": source_sheet,
     }
 
 
@@ -1529,6 +1640,7 @@ def infer_destination_country(invoice, rules):
 
 def merge_preview(invoice, packing, rules):
     warnings = []
+    warnings.extend(packing.get("warnings", []))
     source_anomalies = []
     source_anomalies.extend(invoice.get("anomalies", []))
     source_anomalies.extend(packing.get("anomalies", []))
@@ -1643,7 +1755,8 @@ def merge_preview(invoice, packing, rules):
         "tradeTerm": invoice["tradeTerm"],
         "transportMode": invoice.get("transportMode", ""),
         "currency": invoice["currency"],
-        "exportDateSerial": invoice.get("exportDateSerial") or packing.get("exportDateSerial") or "",
+        "declarationDateSerial": invoice.get("exportDateSerial") or packing.get("exportDateSerial") or "",
+        "exportDateSerial": "",
         "packageKind": "再生木托",
         "packageCount": packing.get("packageCount") or "",
         "grossWeight": packing.get("grossWeight") or "",
@@ -1713,6 +1826,13 @@ def set_cell(root, ref, value):
         is_node = ET.SubElement(cell, f"{{{NS_MAIN}}}is")
         t = ET.SubElement(is_node, f"{{{NS_MAIN}}}t")
         t.text = safe_text(value)
+
+
+def copy_cell_style(root, source_ref, target_ref):
+    source = root.find(f".//{{{NS_MAIN}}}c[@r='{source_ref}']")
+    if source is None or "s" not in source.attrib:
+        return
+    ensure_cell(root, target_ref).attrib["s"] = source.attrib["s"]
 
 
 def apply_cell_style(root, ref, style_id):
@@ -1853,10 +1973,12 @@ def commodity_marker_blocks(markers):
 
 
 def fill_marker_template(sheet_root, markers, preview, red_style_id=None):
+    declaration_date = preview.get("declarationDateSerial") or preview.get("exportDateSerial") or ""
     fixed_values = {
         "境内发货人代码": "91320594762449680U",
         "境内发货人": "凯斯库汽车部件（苏州）有限公司3205240783",
-        "出口日期": preview.get("exportDateSerial") or "",
+        "出口日期": "",
+        "申报日期": declaration_date,
         "境外收货人": preview["consignee"],
         "运输方式": preview.get("transportMode") or "",
         "生产销售单位代码": "91320594762449680U",
@@ -1876,6 +1998,11 @@ def fill_marker_template(sheet_root, markers, preview, red_style_id=None):
     }
     for marker_name, value in fixed_values.items():
         set_marker_value(sheet_root, markers, marker_name, value)
+    declaration_ref = first_marker_ref(markers, "申报日期") or "L4"
+    if not markers.get("申报日期"):
+        export_ref = first_marker_ref(markers, "出口日期") or "G4"
+        copy_cell_style(sheet_root, export_ref, declaration_ref)
+        set_cell(sheet_root, declaration_ref, declaration_date)
 
     blocks = commodity_marker_blocks(markers)
     if len(preview["commodityLines"]) > len(blocks):
@@ -2221,10 +2348,13 @@ def generate_workbook(preview):
         if template_markers.get("合同协议号") or template_markers.get("商品项号"):
             fill_marker_template(main_root, template_markers, preview, red_style_id)
         else:
+            declaration_date = preview.get("declarationDateSerial") or preview.get("exportDateSerial") or ""
+            copy_cell_style(main_root, "G4", "L4")
             values = {
                 "C3": "91320594762449680U",
                 "A4": "凯斯库汽车部件（苏州）有限公司3205240783",
-                "G4": preview.get("exportDateSerial") or "",
+                "G4": "",
+                "L4": declaration_date,
                 "A6": preview["consignee"],
                 "E6": preview.get("transportMode") or "",
                 "C7": "91320594762449680U",
@@ -2568,7 +2698,7 @@ class AppHandler(BaseHTTPRequestHandler):
                     {"filename": Path(packing_file).name, "kind": "packing"},
                 ]
             invoice = parse_invoice(invoice_file)
-            packing = parse_packing(packing_file)
+            packing = parse_packing(packing_file, invoice.get("contractNo"))
             preview = merge_preview(invoice, packing, load_rules())
             history_id = create_history_record(preview, invoice_file, packing_file, classifications, record_id=record_id)
             session_id = uuid.uuid4().hex
