@@ -3,167 +3,334 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>报关单生成</title>
+  <title>报表处理工具</title>
   <link rel="stylesheet" href="/static/styles.css">
 </head>
 <body>
   <main class="shell">
-    <section class="workspace">
-      <header class="topbar">
-        <div class="brand-lockup">
-          <span class="brand-mark">IM</span>
-          <div>
-            <p class="eyebrow">Customs Declaration</p>
-            <h1>报关单生成</h1>
-          </div>
-        </div>
-        <span class="status" id="status">等待上传</span>
-      </header>
+    <header class="app-header">
+      <button class="brand-button" id="homeButton" type="button" title="返回功能首页">
+        <span class="brand-mark">报</span>
+        <span>
+          <small>本地桌面应用</small>
+          <strong>报表处理工具</strong>
+        </span>
+      </button>
+      <div class="header-right">
+        <span class="breadcrumb" id="breadcrumb">功能首页</span>
+        <span class="status" id="status">就绪</span>
+      </div>
+    </header>
 
-      <section class="panel admin-panel" id="adminPanel">
-        <div class="section-head">
-          <div class="section-title">
-            <span class="section-index">01</span>
+    <section class="home-view" id="homeView">
+      <div class="home-heading">
+        <h1>选择要处理的业务</h1>
+        <p>两个功能相互独立，规则、模板和历史记录分别保存。</p>
+      </div>
+      <div class="entry-grid">
+        <button class="entry-card declaration-entry" type="button" data-open-module="declaration">
+          <span class="entry-icon">关</span>
+          <span class="entry-copy">
+            <strong>报关单生成</strong>
+            <small>Invoice + Packing list 匹配、合并并生成报关单</small>
+          </span>
+          <span class="entry-arrow" aria-hidden="true">›</span>
+        </button>
+        <button class="entry-card merge-entry" type="button" data-open-module="merge">
+          <span class="entry-icon">合</span>
+          <span class="entry-copy">
+            <strong>报表合并</strong>
+            <small>按客户规则合并多份报表，并套用客户输出模板</small>
+          </span>
+          <span class="entry-arrow" aria-hidden="true">›</span>
+        </button>
+      </div>
+    </section>
+
+    <section class="module-view" id="declarationView" data-module-view="declaration" hidden>
+      <div class="module-heading">
+        <div>
+          <p class="eyebrow">Customs Declaration</p>
+          <h1>报关单生成</h1>
+        </div>
+        <button class="secondary compact-button" type="button" data-go-home>‹ 返回功能首页</button>
+      </div>
+      <nav class="tabs" aria-label="报关单生成功能">
+        <button class="tab active" type="button" data-module="declaration" data-tab="work">生成报关单</button>
+        <button class="tab" type="button" data-module="declaration" data-tab="config">规则与模板</button>
+        <button class="tab" type="button" data-module="declaration" data-tab="recent">最近记录</button>
+        <button class="tab" type="button" data-module="declaration" data-tab="history">历史查询</button>
+      </nav>
+
+      <div class="tab-panel" data-module="declaration" data-panel="work">
+        <section class="panel upload-panel">
+          <div class="section-head">
             <div>
-              <p class="section-kicker">System Files</p>
-              <h2>规则和模板维护</h2>
+              <span class="step-label">步骤 1</span>
+              <h2>上传报关资料</h2>
+            </div>
+            <span class="soft-note">一次选择 Invoice 和 Packing list 两个文件</span>
+          </div>
+          <form id="d-upload-form" class="upload-row">
+            <label class="file-drop">
+              <span>Invoice + Packing list</span>
+              <strong id="d-documents-name">选择两个 .xls / .xlsx 文件</strong>
+              <input id="d-documents" name="documents" type="file" accept=".xls,.xlsx" multiple required>
+            </label>
+            <button class="primary" type="submit">解析并预览</button>
+          </form>
+        </section>
+
+        <section class="summary-grid declaration-summary" id="d-summary" hidden>
+          <div class="metric"><span>合同号</span><strong data-d-field="contractNo">-</strong></div>
+          <div class="metric"><span>件数</span><strong data-d-field="packageCount">-</strong></div>
+          <div class="metric"><span>毛重</span><strong data-d-field="grossWeight">-</strong></div>
+          <div class="metric"><span>净重</span><strong data-d-field="netWeight">-</strong></div>
+          <div class="metric"><span>总数量</span><strong data-d-field="totalQuantity">-</strong></div>
+          <div class="metric"><span>总金额</span><strong data-d-field="totalAmount">-</strong></div>
+        </section>
+
+        <section class="panel preview-panel" id="d-preview-panel" hidden>
+          <div class="section-head">
+            <div>
+              <span class="step-label">步骤 2</span>
+              <h2>报关单预览</h2>
+            </div>
+            <div class="panel-actions">
+              <button class="secondary" id="d-preview-toggle" type="button">收起预览</button>
+              <button class="primary" id="d-generate" type="button">生成并下载</button>
             </div>
           </div>
-          <span class="danger-note">不要随意调整规则和模板</span>
-        </div>
-        <form id="adminForm" class="admin-form">
-          <div class="maintenance-grid">
-            <label class="file-drop">
-              <span>报关单模板</span>
-              <strong id="templateName">选择 .xlsx 模板</strong>
-              <input id="template" name="template" type="file" accept=".xlsx">
-            </label>
-
-            <label class="file-drop">
-              <span>Daily Export List / HS 规则表</span>
-              <strong id="rulesName">选择 .xlsx 规则表</strong>
-              <input id="rules" name="rules" type="file" accept=".xlsx">
-            </label>
-
-            <button class="primary" type="submit">上传并启用</button>
-          </div>
-        </form>
-        <pre class="admin-result" id="adminResult" hidden></pre>
-      </section>
-
-      <section class="panel upload-panel">
-        <div class="section-head">
-          <div class="section-title">
-            <span class="section-index">02</span>
-            <div>
-              <p class="section-kicker">Declaration Source</p>
-              <h2>报关资料上传</h2>
+          <div id="d-preview-body">
+            <div class="details-grid">
+              <div><span>境外收货人</span><strong id="d-consignee">-</strong></div>
+              <div><span>成交方式</span><strong id="d-trade-term">-</strong></div>
+              <div><span>币制</span><strong id="d-currency">-</strong></div>
+            </div>
+            <div class="warnings" id="d-warnings" hidden></div>
+            <div class="table-wrap">
+              <table class="declaration-table">
+                <thead>
+                  <tr>
+                    <th>项号</th><th>HS Code</th><th>商品名称</th><th>品牌</th>
+                    <th>数量</th><th>净重</th><th>金额</th><th>币制</th>
+                  </tr>
+                </thead>
+                <tbody id="d-lines"></tbody>
+              </table>
             </div>
           </div>
-        </div>
-        <form id="uploadForm">
-          <label class="file-drop">
-            <span>Invoice + Packing list</span>
-            <strong id="documentsName">一次选择两个文件</strong>
-            <input id="documents" name="documents" type="file" accept=".xls,.xlsx" multiple required>
-          </label>
-          <button class="primary" type="submit">解析并预览</button>
-        </form>
-      </section>
+        </section>
+      </div>
 
-      <section class="panel history-panel">
-        <div class="panel-title">
-          <h2>最近上传记录</h2>
-          <button class="secondary" id="refreshHistoryBtn" type="button">刷新</button>
-        </div>
-        <div class="history-list" id="historyList">
-          <div class="empty-state">暂无历史记录</div>
-        </div>
-      </section>
-
-      <section class="panel history-panel">
-        <div class="panel-title">
-          <h2>历史上传记录</h2>
-        </div>
-        <form class="history-search" id="historySearchForm">
-          <label>
-            <span>开始时间</span>
-            <input id="historyStart" name="start" type="datetime-local">
-          </label>
-          <label>
-            <span>结束时间</span>
-            <input id="historyEnd" name="end" type="datetime-local">
-          </label>
-          <button class="secondary" type="submit">查询</button>
-        </form>
-        <div class="history-search-summary" id="historySearchSummary">请选择时间段查询</div>
-        <div class="history-pager" id="historyPager" hidden></div>
-        <div class="history-list" id="historySearchList">
-          <div class="empty-state">暂无查询结果</div>
-        </div>
-      </section>
-
-      <section class="summary-grid" id="summary" hidden>
-        <div class="metric">
-          <span>合同号</span>
-          <strong data-field="contractNo">-</strong>
-        </div>
-        <div class="metric">
-          <span>件数</span>
-          <strong data-field="packageCount">-</strong>
-        </div>
-        <div class="metric">
-          <span>毛重</span>
-          <strong data-field="grossWeight">-</strong>
-        </div>
-        <div class="metric">
-          <span>净重</span>
-          <strong data-field="netWeight">-</strong>
-        </div>
-        <div class="metric">
-          <span>总数量</span>
-          <strong data-field="totalQuantity">-</strong>
-        </div>
-        <div class="metric">
-          <span>总金额</span>
-          <strong data-field="totalAmount">-</strong>
-        </div>
-      </section>
-
-      <section class="panel" id="previewPanel" hidden>
-        <div class="panel-title">
-          <h2>预览</h2>
-          <div class="panel-actions">
-            <button class="secondary" id="previewToggle" type="button" aria-expanded="true">收起预览</button>
-            <button class="primary" id="generateBtn" type="button">生成并下载</button>
+      <div class="tab-panel" data-module="declaration" data-panel="config" hidden>
+        <section class="panel config-panel">
+          <div class="section-head">
+            <div>
+              <span class="step-label">独立配置</span>
+              <h2>报关单规则与模板</h2>
+            </div>
+            <span class="soft-note">上传成功后仅影响报关单生成</span>
           </div>
-        </div>
-        <div id="previewBody">
-          <div class="details">
-            <div><span>境外收货人</span><strong id="consignee">-</strong></div>
-            <div><span>成交方式</span><strong id="tradeTerm">-</strong></div>
-            <div><span>币制</span><strong id="currency">-</strong></div>
+          <div class="active-config" id="d-active-config">
+            <div class="config-item"><span>当前报关单模板</span><strong>读取中</strong></div>
+            <div class="config-item"><span>当前匹配规则</span><strong>读取中</strong></div>
           </div>
-          <div class="warnings" id="warnings" hidden></div>
-          <div class="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>项号</th>
-                  <th>HS Code</th>
-                  <th>商品名称</th>
-                  <th>品牌</th>
-                  <th>数量</th>
-                  <th>净重</th>
-                  <th>金额</th>
-                  <th>币制</th>
-                </tr>
-              </thead>
-              <tbody id="lines"></tbody>
-            </table>
+          <form id="d-config-form" class="maintenance-grid">
+            <label class="file-drop">
+              <span>报关单生成模板</span>
+              <strong id="d-template-name">选择 .xlsx 模板</strong>
+              <input id="d-template" name="template" type="file" accept=".xlsx">
+            </label>
+            <label class="file-drop">
+              <span>报关单匹配规则</span>
+              <strong id="d-rules-name">选择 .xlsx 规则表</strong>
+              <input id="d-rules" name="rules" type="file" accept=".xlsx">
+            </label>
+            <button class="primary" type="submit">验证并启用</button>
+          </form>
+          <div class="inline-result" id="d-config-result" hidden></div>
+        </section>
+      </div>
+
+      <div class="tab-panel" data-module="declaration" data-panel="recent" hidden>
+        <section class="panel history-panel">
+          <div class="section-head">
+            <div>
+              <span class="step-label">最近 5 条</span>
+              <h2>最近上传记录</h2>
+            </div>
+            <button class="secondary compact-button" id="d-refresh-history" type="button">刷新</button>
           </div>
+          <div class="history-list" id="d-history-list"><div class="empty-state">暂无历史记录</div></div>
+        </section>
+      </div>
+
+      <div class="tab-panel" data-module="declaration" data-panel="history" hidden>
+        <section class="panel history-panel">
+          <div class="section-head">
+            <div>
+              <span class="step-label">每页最多 50 条</span>
+              <h2>按时间查询历史</h2>
+            </div>
+          </div>
+          <form class="history-search" id="d-history-search-form">
+            <label><span>开始时间</span><input id="d-history-start" type="datetime-local"></label>
+            <label><span>结束时间</span><input id="d-history-end" type="datetime-local"></label>
+            <button class="secondary" type="submit">查询</button>
+          </form>
+          <div class="history-search-summary" id="d-history-search-summary">请选择时间段查询</div>
+          <div class="history-pager" id="d-history-pager" hidden></div>
+          <div class="history-list" id="d-history-search-list"><div class="empty-state">暂无查询结果</div></div>
+        </section>
+      </div>
+    </section>
+
+    <section class="module-view" id="mergeView" data-module-view="merge" hidden>
+      <div class="module-heading">
+        <div>
+          <p class="eyebrow merge-eyebrow">Report Merge</p>
+          <h1>报表合并</h1>
         </div>
-      </section>
+        <button class="secondary compact-button" type="button" data-go-home>‹ 返回功能首页</button>
+      </div>
+      <nav class="tabs merge-tabs" aria-label="报表合并功能">
+        <button class="tab active" type="button" data-module="merge" data-tab="work">合并报表</button>
+        <button class="tab" type="button" data-module="merge" data-tab="config">规则与模板</button>
+        <button class="tab" type="button" data-module="merge" data-tab="recent">最近记录</button>
+        <button class="tab" type="button" data-module="merge" data-tab="history">历史查询</button>
+      </nav>
+
+      <div class="tab-panel" data-module="merge" data-panel="work">
+        <section class="panel upload-panel merge-accent">
+          <div class="section-head">
+            <div>
+              <span class="step-label">步骤 1</span>
+              <h2>上传待合并报表</h2>
+            </div>
+            <span class="file-count" id="m-file-count">0 / 30</span>
+          </div>
+          <form id="m-upload-form" class="upload-row">
+            <label class="file-drop">
+              <span>源报表</span>
+              <strong id="m-documents-name">一次选择 1～30 份 .xls / .xlsx</strong>
+              <input id="m-documents" name="documents" type="file" accept=".xls,.xlsx" multiple required>
+            </label>
+            <button class="primary merge-primary" type="submit">解析并预览</button>
+          </form>
+        </section>
+
+        <section class="summary-grid merge-summary" id="m-summary" hidden>
+          <div class="metric"><span>源文件</span><strong data-m-field="sourceCount">-</strong></div>
+          <div class="metric"><span>输出明细</span><strong data-m-field="rowCount">-</strong></div>
+          <div class="metric"><span>数量合计</span><strong data-m-field="totalQuantity">-</strong></div>
+          <div class="metric"><span>金额合计</span><strong data-m-field="totalAmount">-</strong></div>
+          <div class="metric metric-ok"><span>精确匹配</span><strong data-m-field="exactCount">-</strong></div>
+          <div class="metric metric-warn"><span>命名规则</span><strong data-m-field="namingRuleCount">-</strong></div>
+          <div class="metric metric-error"><span>未匹配</span><strong data-m-field="missingCount">-</strong></div>
+        </section>
+
+        <section class="panel preview-panel" id="m-preview-panel" hidden>
+          <div class="section-head">
+            <div>
+              <span class="step-label">步骤 2</span>
+              <h2>合并预览</h2>
+              <p class="subtle" id="m-preview-meta"></p>
+            </div>
+            <div class="panel-actions">
+              <button class="secondary" id="m-preview-toggle" type="button">收起预览</button>
+              <button class="primary merge-primary" id="m-generate" type="button" disabled>确认并生成</button>
+            </div>
+          </div>
+          <div id="m-preview-body">
+            <div class="legend">
+              <span><i class="legend-dot exact"></i>精确匹配</span>
+              <span><i class="legend-dot fallback"></i>命名规则匹配，需复核</span>
+              <span><i class="legend-dot missing"></i>未匹配或冲突，字段留空</span>
+            </div>
+            <div class="warnings" id="m-warnings" hidden></div>
+            <label class="confirm-box" id="m-confirm-box" hidden>
+              <input id="m-warning-confirm" type="checkbox">
+              <span>我已核对黄色命名规则匹配和红色未匹配/冲突项目，确认按当前预览生成。</span>
+            </label>
+            <div class="preview-limit" id="m-preview-limit" hidden></div>
+            <div class="table-wrap">
+              <table class="merge-table">
+                <thead>
+                  <tr>
+                    <th>来源文件</th><th>Serial No.</th><th>项号</th><th>QAD PN</th>
+                    <th>数量</th><th>金额</th><th>币种</th><th>提货日期</th>
+                    <th>Ship to</th><th>商品名称及规格型号</th><th>商品编号</th><th>匹配结果</th>
+                  </tr>
+                </thead>
+                <tbody id="m-preview-rows"></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <div class="tab-panel" data-module="merge" data-panel="config" hidden>
+        <section class="panel config-panel merge-accent">
+          <div class="section-head">
+            <div>
+              <span class="step-label">独立配置</span>
+              <h2>合并规则与生成模板</h2>
+            </div>
+            <span class="soft-note">上传成功后仅影响报表合并</span>
+          </div>
+          <div class="active-config" id="m-active-config">
+            <div class="config-item"><span>当前合并生成模板</span><strong>读取中</strong></div>
+            <div class="config-item"><span>当前合并规则</span><strong>读取中</strong></div>
+          </div>
+          <form id="m-config-form" class="maintenance-grid">
+            <label class="file-drop">
+              <span>合并后的生成模板</span>
+              <strong id="m-template-name">选择 .xlsx 模板</strong>
+              <input id="m-template" name="template" type="file" accept=".xlsx">
+            </label>
+            <label class="file-drop">
+              <span>报表合并规则</span>
+              <strong id="m-rules-name">选择 .xlsx 规则</strong>
+              <input id="m-rules" name="rules" type="file" accept=".xlsx">
+            </label>
+            <button class="primary merge-primary" type="submit">验证并启用</button>
+          </form>
+          <div class="inline-result" id="m-config-result" hidden></div>
+        </section>
+      </div>
+
+      <div class="tab-panel" data-module="merge" data-panel="recent" hidden>
+        <section class="panel history-panel">
+          <div class="section-head">
+            <div>
+              <span class="step-label">最近 5 条</span>
+              <h2>最近合并记录</h2>
+            </div>
+            <button class="secondary compact-button" id="m-refresh-history" type="button">刷新</button>
+          </div>
+          <div class="history-list" id="m-history-list"><div class="empty-state">暂无历史记录</div></div>
+        </section>
+      </div>
+
+      <div class="tab-panel" data-module="merge" data-panel="history" hidden>
+        <section class="panel history-panel">
+          <div class="section-head">
+            <div>
+              <span class="step-label">每页最多 50 条</span>
+              <h2>按时间查询历史</h2>
+            </div>
+          </div>
+          <form class="history-search" id="m-history-search-form">
+            <label><span>开始时间</span><input id="m-history-start" type="datetime-local"></label>
+            <label><span>结束时间</span><input id="m-history-end" type="datetime-local"></label>
+            <button class="secondary" type="submit">查询</button>
+          </form>
+          <div class="history-search-summary" id="m-history-search-summary">请选择时间段查询</div>
+          <div class="history-pager" id="m-history-pager" hidden></div>
+          <div class="history-list" id="m-history-search-list"><div class="empty-state">暂无查询结果</div></div>
+        </section>
+      </div>
     </section>
   </main>
   <script src="/static/app.js"></script>

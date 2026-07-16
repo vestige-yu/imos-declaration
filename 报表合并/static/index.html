@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>报表合并</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <main class="shell">
+    <section class="workspace">
+      <header class="topbar">
+        <div class="brand-lockup">
+          <span class="brand-mark">RM</span>
+          <div>
+            <p class="eyebrow">Report Merge</p>
+            <h1>报表合并</h1>
+          </div>
+        </div>
+        <span class="status" id="status">等待上传</span>
+      </header>
+
+      <section class="panel config-panel">
+        <div class="section-head">
+          <div class="section-title">
+            <span class="section-index">01</span>
+            <div>
+              <p class="section-kicker">Template & Rules</p>
+              <h2>模板和规则维护</h2>
+            </div>
+          </div>
+          <span class="note">上传成功后立即作为当前配置生效</span>
+        </div>
+
+        <div class="active-config" id="activeConfig">
+          <div class="config-card"><span>输出模板</span><strong>读取中</strong></div>
+          <div class="config-card"><span>匹配规则</span><strong>读取中</strong></div>
+        </div>
+
+        <form id="configForm" class="maintenance-grid">
+          <label class="file-drop">
+            <span>客户输出模板</span>
+            <strong id="templateName">选择 .xlsx 模板</strong>
+            <input id="template" name="template" type="file" accept=".xlsx">
+          </label>
+          <label class="file-drop">
+            <span>QAD PN 匹配规则</span>
+            <strong id="rulesName">选择 .xlsx 规则</strong>
+            <input id="rules" name="rules" type="file" accept=".xlsx">
+          </label>
+          <button class="primary" type="submit">上传并启用</button>
+        </form>
+        <div class="inline-result" id="configResult" hidden></div>
+      </section>
+
+      <section class="panel upload-panel">
+        <div class="section-head">
+          <div class="section-title">
+            <span class="section-index">02</span>
+            <div>
+              <p class="section-kicker">Source Reports</p>
+              <h2>上传待合并报表</h2>
+            </div>
+          </div>
+          <span class="file-count" id="fileCount">0 / 30</span>
+        </div>
+        <form id="uploadForm">
+          <label class="file-drop source-drop">
+            <span>源报表</span>
+            <strong id="documentsName">一次选择 1～30 份 .xls / .xlsx</strong>
+            <input id="documents" name="documents" type="file" accept=".xls,.xlsx" multiple required>
+          </label>
+          <button class="primary" type="submit">解析并预览</button>
+        </form>
+      </section>
+
+      <section class="summary-grid" id="summary" hidden>
+        <div class="metric"><span>源文件</span><strong data-field="sourceCount">-</strong></div>
+        <div class="metric"><span>输出明细</span><strong data-field="rowCount">-</strong></div>
+        <div class="metric"><span>数量合计</span><strong data-field="totalQuantity">-</strong></div>
+        <div class="metric"><span>金额合计</span><strong data-field="totalAmount">-</strong></div>
+        <div class="metric metric-ok"><span>精确匹配</span><strong data-field="exactCount">-</strong></div>
+        <div class="metric metric-warn"><span>命名规则匹配</span><strong data-field="namingRuleCount">-</strong></div>
+        <div class="metric metric-error"><span>完全未匹配</span><strong data-field="missingCount">-</strong></div>
+      </section>
+
+      <section class="panel preview-panel" id="previewPanel" hidden>
+        <div class="panel-title">
+          <div>
+            <h2>合并预览</h2>
+            <p class="subtle" id="previewMeta"></p>
+          </div>
+          <div class="panel-actions">
+            <button class="secondary" id="previewToggle" type="button" aria-expanded="true">收起预览</button>
+            <button class="primary" id="generateBtn" type="button" disabled>确认并生成</button>
+          </div>
+        </div>
+
+        <div id="previewBody">
+          <div class="legend">
+            <span><i class="legend-dot exact"></i>精确匹配</span>
+            <span><i class="legend-dot fallback"></i>命名规则匹配，需复核</span>
+            <span><i class="legend-dot missing"></i>未匹配或规则冲突，字段留空</span>
+          </div>
+
+          <div class="warnings" id="warnings" hidden></div>
+
+          <label class="confirm-box" id="confirmBox" hidden>
+            <input id="warningConfirm" type="checkbox">
+            <span>我已核对黄色命名规则匹配和红色未匹配/冲突项目，确认按当前预览生成。</span>
+          </label>
+
+          <div class="preview-limit" id="previewLimit" hidden></div>
+
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>来源文件</th>
+                  <th>Serial No.</th>
+                  <th>项号</th>
+                  <th>QAD PN</th>
+                  <th>数量</th>
+                  <th>金额</th>
+                  <th>币种</th>
+                  <th>提货日期</th>
+                  <th>Ship to</th>
+                  <th>商品名称及规格型号</th>
+                  <th>商品编号</th>
+                  <th>匹配结果</th>
+                </tr>
+              </thead>
+              <tbody id="previewRows"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel history-panel">
+        <div class="panel-title">
+          <div>
+            <h2>最近合并记录</h2>
+            <p class="subtle">源报表、当时使用的模板/规则、预览和结果均保存在本机。</p>
+          </div>
+          <button class="secondary" id="refreshHistoryBtn" type="button">刷新</button>
+        </div>
+        <div class="history-list" id="historyList">
+          <div class="empty-state">暂无历史记录</div>
+        </div>
+      </section>
+
+      <section class="panel history-panel">
+        <div class="panel-title">
+          <h2>按时间查询历史</h2>
+        </div>
+        <form class="history-search" id="historySearchForm">
+          <label>
+            <span>开始时间</span>
+            <input id="historyStart" name="start" type="datetime-local">
+          </label>
+          <label>
+            <span>结束时间</span>
+            <input id="historyEnd" name="end" type="datetime-local">
+          </label>
+          <button class="secondary" type="submit">查询</button>
+        </form>
+        <div class="history-search-summary" id="historySearchSummary">请选择时间段查询</div>
+        <div class="history-pager" id="historyPager" hidden></div>
+        <div class="history-list" id="historySearchList">
+          <div class="empty-state">暂无查询结果</div>
+        </div>
+      </section>
+    </section>
+  </main>
+  <script src="/static/app.js"></script>
+</body>
+</html>

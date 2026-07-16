@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import cgi
+import copy
 import html
 import io
 import json
@@ -16,6 +17,7 @@ import sys
 import threading
 import time
 import traceback
+import unicodedata
 import urllib.parse
 import uuid
 import webbrowser
@@ -24,6 +26,12 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from xml.etree import ElementTree as ET
+
+try:
+    from merge_bridge import service as merge_service
+except ModuleNotFoundError:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from merge_bridge import service as merge_service
 
 
 APP_NAME = "SuriWorkDeclaration"
@@ -118,6 +126,43 @@ def active_rules_path():
 
 def storage_meta_path():
     return DATA_DIR / "meta.json"
+
+
+def declaration_config_status():
+    ensure_app_dirs()
+    meta_path = storage_meta_path()
+    meta = json_loads(meta_path.read_text("utf-8"), {}) if meta_path.exists() else {}
+    template_path = active_template_path()
+    rules_path = active_rules_path()
+    template_meta = meta.get("template") or {}
+    rules_meta = meta.get("rules") or {}
+    rule_count = 0
+    conflict_count = 0
+    if rules_path.exists():
+        rules = load_rules(rules_path)
+        rule_count = len([key for key in rules if not key.startswith("__")])
+        conflict_count = len(rules.get("__part_conflicts", {}))
+    return {
+        "template": {
+            "filename": (
+                template_meta.get("filename")
+                or (
+                    "报关单空白模板.xlsx"
+                    if template_path == DEFAULT_TEMPLATE
+                    else template_path.name
+                )
+            ),
+            "updatedAt": template_meta.get("updatedAt") or "内置默认",
+            "source": "uploaded" if (TEMPLATE_DIR / "template.xlsx").exists() else "default",
+        },
+        "rules": {
+            "filename": rules_meta.get("filename") or rules_path.name,
+            "updatedAt": rules_meta.get("updatedAt") or "内置默认",
+            "source": "uploaded" if (RULES_DIR / "rules.xlsx").exists() else "default",
+            "recordCount": rule_count,
+            "conflictCount": conflict_count,
+        },
+    }
 
 
 def db_connect():
@@ -377,7 +422,7 @@ def update_worksheet_dimension(root):
     dimension.attrib["ref"] = f"A1:{excel_col_name(max_col - 1)}{max_row}"
 
 
-def validate_xlsx_file(path):
+def validate_xlsx_file(path, require_dimensions=False):
     try:
         with zipfile.ZipFile(path, "r") as workbook:
             required = {
@@ -400,11 +445,12 @@ def validate_xlsx_file(path):
                         sheet_root = ET.fromstring(content)
                         end = worksheet_dimension_end(sheet_root)
                         max_row, max_col = worksheet_cell_bounds(sheet_root)
-                        if end is None:
+                        if require_dimensions and end is None:
                             raise ValueError(f"{name} 缺少工作表 dimension")
-                        end_row, end_col = end
-                        if end_row < max_row or end_col < max_col:
-                            raise ValueError(f"{name} 工作表 dimension 未覆盖实际单元格")
+                        if require_dimensions and end is not None:
+                            end_row, end_col = end
+                            if end_row < max_row or end_col < max_col:
+                                raise ValueError(f"{name} 工作表 dimension 未覆盖实际单元格")
     except zipfile.BadZipFile as exc:
         raise ValueError("生成文件不是有效的 Excel 工作簿") from exc
     except ET.ParseError as exc:
@@ -447,8 +493,72 @@ def round2(value):
     return round(float(value or 0), 2)
 
 
+def normalized_part_text(value):
+    text = unicodedata.normalize("NFKC", safe_text(value)).upper()
+    text = re.sub(r"\s+", "", text)
+    if re.fullmatch(r"\d+\.0+", text):
+        text = text.split(".", 1)[0]
+    return text
+
+
+def is_plausible_part_no(value):
+    text = normalized_part_text(value)
+    return bool(
+        text
+        and re.fullmatch(r"[A-Z0-9._/-]+", text)
+        and re.search(r"\d", text)
+    )
+
+
+def part_match_keys(value):
+    text = normalized_part_text(value)
+    if not text:
+        return []
+
+    def canonicalize(candidate):
+        compact = re.sub(r"[-_/.]+", "", candidate)
+        if compact.isdigit():
+            compact = compact.strip("0")
+        return compact or ("0" if candidate else "")
+
+    keys = []
+
+    def add_key(candidate):
+        key = canonicalize(candidate)
+        if key and key not in keys:
+            keys.append(key)
+
+    add_key(text)
+    version_match = re.fullmatch(r"(.+)[-_/.]([A-Z0-9]{1,4})", text)
+    if (
+        version_match
+        and re.search(r"\d", version_match.group(1))
+        and re.search(r"\d", version_match.group(2))
+    ):
+        add_key(version_match.group(1))
+    return keys
+
+
 def normalize_part(value):
-    return safe_text(value).upper().replace(" ", "")
+    keys = part_match_keys(value)
+    return keys[0] if keys else ""
+
+
+def part_lookup(mapping, value, default=""):
+    for key in part_match_keys(value):
+        if key in mapping:
+            return mapping[key]
+    return default
+
+
+def part_rule_lookup(rules, value):
+    conflicts = rules.get("__part_conflicts", {})
+    for key in part_match_keys(value):
+        if key in conflicts:
+            return {}, key, conflicts[key]
+        if key in rules:
+            return rules[key], key, None
+    return {}, "", None
 
 
 def normalize_transport_mode(value):
@@ -495,14 +605,19 @@ def normalize_brand(value):
 
 
 def excel_serial_from_yyyymmdd(text):
-    match = re.search(r"(20\d{6})", text or "")
-    if not match:
-        return ""
-    ymd = match.group(1)
-    year, month, day = int(ymd[:4]), int(ymd[4:6]), int(ymd[6:8])
     import datetime as _dt
+
     base = _dt.date(1899, 12, 30)
-    return (_dt.date(year, month, day) - base).days
+    for ymd in re.findall(r"20\d{6}", text or ""):
+        year = int(ymd[:4])
+        month = int(ymd[4:6])
+        day = int(ymd[6:8])
+        try:
+            parsed = _dt.date(year, month, day)
+        except ValueError:
+            continue
+        return (parsed - base).days
+    return ""
 
 
 def excel_serial_from_date_value(value):
@@ -1493,11 +1608,11 @@ def parse_packing(path, expected_contract_no=""):
             append_numeric_anomaly(anomalies, "Packing list", sheet_idx, row_idx, row, qty_col, "Quantity", True)
             append_numeric_anomaly(anomalies, "Packing list", sheet_idx, row_idx, row, net_col, "N.W.(KG)", True)
             append_numeric_anomaly(anomalies, "Packing list", sheet_idx, row_idx, row, gross_col, "G.W.(KG)", True)
-            part_key = normalize_part(part)
             item_net_weight = round2(to_number(row[net_col]))
             item_gross_weight = round2(to_number(row[gross_col]))
-            part_weights[part_key] = round2(part_weights.get(part_key, 0) + item_net_weight)
-            part_gross_weights[part_key] = round2(part_gross_weights.get(part_key, 0) + item_gross_weight)
+            for part_key in part_match_keys(part):
+                part_weights[part_key] = round2(part_weights.get(part_key, 0) + item_net_weight)
+                part_gross_weights[part_key] = round2(part_gross_weights.get(part_key, 0) + item_gross_weight)
             summed_net_weight += item_net_weight
             summed_gross_weight += item_gross_weight
             if pallet_col is not None and pallet_col < len(row):
@@ -1549,7 +1664,11 @@ def load_rules(path=None):
     path = Path(path) if path else active_rules_path()
     if not path.exists():
         return {}
-    rules = {"__standardization": {}}
+    rules = {
+        "__standardization": {},
+        "__part_conflicts": {},
+        "__part_sources": {},
+    }
     book = XlsxBook(path)
     try:
         if "值标准化表" in book.sheet_map:
@@ -1574,50 +1693,142 @@ def load_rules(path=None):
                         rules["__standardization"].setdefault(category, []).append((raw_value, standard_value))
 
         product_sheet_names = [name for name in book.sheet_map if "商品主数据" in name]
-        sheet_names = product_sheet_names or list(book.sheet_map)
+        if product_sheet_names:
+            sheet_names = product_sheet_names
+        else:
+            sheet_names = []
+            fallback_sheet_names = []
+            for sheet_name in book.sheet_map:
+                candidate_rows = book.rows(sheet_name)
+                if not candidate_rows:
+                    continue
+                candidate_header_idx = find_header_index_by_terms(
+                    candidate_rows,
+                    [("qad pn", "qad p/n", "料号/part no", "part no"), ("hs code", "商品编号")],
+                )
+                if candidate_header_idx is None:
+                    continue
+                candidate_headers = candidate_rows[candidate_header_idx]
+                qad_col = header_col(candidate_headers, "QAD PN", "QAD P/N", "料号/Part No")
+                description_col = header_col(
+                    candidate_headers,
+                    "中文商品名称",
+                    "商品名称及规格型号",
+                    "中文品名",
+                    "Description",
+                )
+                brand_candidate_col = header_col(candidate_headers, "品牌", "Brand")
+                if qad_col is not None and description_col is not None and brand_candidate_col is not None:
+                    sheet_names.append(sheet_name)
+                else:
+                    fallback_sheet_names.append(sheet_name)
+            if not sheet_names:
+                sheet_names = fallback_sheet_names
+
         for sheet_name in sheet_names:
             rows = book.rows(sheet_name)
             if not rows:
                 continue
-            header_idx = find_header_index_by_terms(rows, [("qad pn", "part", "part no", "料号"), ("hs code", "商品编号")])
+            header_idx = find_header_index_by_terms(
+                rows,
+                [("qad pn", "qad p/n", "料号/part no", "part no", "料号"), ("hs code", "商品编号")],
+            )
             if header_idx is None:
                 continue
-            header = [safe_text(v).lower() for v in rows[header_idx]]
-            compact_header = normalized_header(rows[header_idx])
-            enabled_col = header_col(rows[header_idx], "是否启用")
+            headers = rows[header_idx]
+            enabled_col = header_col(headers, "是否启用")
+            source_sheet_col = header_col(headers, "来源Sheet", "来源 Sheet")
+            primary_part_col = header_col(
+                headers,
+                "QAD PN",
+                "QAD P/N",
+                "料号/Part No",
+                "Part No.",
+                "Part No",
+                "料号",
+            )
+            old_part_col = header_col(headers, "备用料号/Old Part No", "Old Part No.", "Old Part No")
             part_cols = [
-                i for i, v in enumerate(header)
-                if (
-                    "qad" in v
-                    or "part no" in v
-                    or "partno" in v
-                    or "old part" in v
-                    or "料号" in v
-                )
-                and "imos" not in v
-                and "报关单pn" not in v
+                col
+                for col in (primary_part_col, old_part_col)
+                if col is not None
             ]
-            hs_col = next((i for i, v in enumerate(compact_header) if ("hs" in v and "code" in v) or "商品编号" in header[i]), None)
-            desc_col = next((i for i, v in enumerate(header) if "description" in v or "货物名称" in v or "商品名称" in v), None)
-            brand_col = next((i for i, v in enumerate(header) if "品牌" in v or "brand" in v), None)
-            if not part_cols or hs_col is None:
+            hs_cols = [
+                col
+                for col in (
+                    header_col(headers, "更新hs code", "最新hs code"),
+                    header_col(headers, "HS Code", "商品编号"),
+                )
+                if col is not None
+            ]
+            desc_col = header_col(
+                headers,
+                "中文商品名称",
+                "商品名称及规格型号",
+                "中文品名",
+                "Description",
+            )
+            brand_col = header_col(headers, "品牌", "Brand")
+            if not part_cols or not hs_cols:
                 continue
             for row in rows[header_idx + 1:]:
                 if enabled_col is not None and enabled_col < len(row) and not is_enabled_value(row[enabled_col]):
                     continue
+                record = {}
+                for hs_col in hs_cols:
+                    if hs_col < len(row) and normalize_hs(row[hs_col]):
+                        record["hsCode"] = normalize_hs(row[hs_col])
+                        break
+                if desc_col is not None and desc_col < len(row) and safe_text(row[desc_col]):
+                    record["goodsName"] = safe_text(row[desc_col])
+                if brand_col is not None and brand_col < len(row) and safe_text(row[brand_col]):
+                    record["brand"] = (
+                        standardize_config_value(rules, "品牌", row[brand_col])
+                        or normalize_brand(row[brand_col])
+                    )
                 for part_col in part_cols:
                     if part_col >= len(row):
                         continue
-                    key = normalize_part(row[part_col])
-                    if not key:
+                    raw_part = safe_text(row[part_col])
+                    if not is_plausible_part_no(raw_part):
                         continue
-                    rules.setdefault(key, {})
-                    if hs_col < len(row) and normalize_hs(row[hs_col]):
-                        rules[key]["hsCode"] = normalize_hs(row[hs_col])
-                    if desc_col is not None and desc_col < len(row) and safe_text(row[desc_col]):
-                        rules[key]["goodsName"] = safe_text(row[desc_col])
-                    if brand_col is not None and brand_col < len(row) and safe_text(row[brand_col]):
-                        rules[key]["brand"] = standardize_config_value(rules, "品牌", row[brand_col]) or normalize_brand(row[brand_col])
+                    keys = part_match_keys(raw_part)
+                    if (
+                        source_sheet_col is not None
+                        and source_sheet_col < len(row)
+                        and "补充" in safe_text(row[source_sheet_col])
+                    ):
+                        keys = keys[:1]
+                    if not keys:
+                        continue
+                    for key in keys:
+                        sources = rules["__part_sources"].setdefault(key, [])
+                        if raw_part not in sources:
+                            sources.append(raw_part)
+                        if key in rules["__part_conflicts"]:
+                            rules["__part_conflicts"][key]["parts"] = list(sources)
+                            continue
+                        existing = rules.get(key)
+                        if existing is None:
+                            rules[key] = dict(record)
+                            continue
+                        conflict_fields = [
+                            field
+                            for field in ("hsCode", "goodsName", "brand")
+                            if existing.get(field)
+                            and record.get(field)
+                            and existing[field] != record[field]
+                        ]
+                        if conflict_fields:
+                            rules.pop(key, None)
+                            rules["__part_conflicts"][key] = {
+                                "parts": list(sources),
+                                "fields": conflict_fields,
+                            }
+                            continue
+                        for field, value in record.items():
+                            if value and not existing.get(field):
+                                existing[field] = value
     finally:
         book.close()
     return rules
@@ -1655,18 +1866,28 @@ def merge_preview(invoice, packing, rules):
 
     enriched = []
     missing_rules = []
+    rule_conflicts = []
     for item in invoice["items"]:
-        rule = rules.get(normalize_part(item["partNo"])) or {}
+        rule, _, conflict = part_rule_lookup(rules, item["partNo"])
         merged = dict(item)
         merged["hsCode"] = rule.get("hsCode", "")
         merged["goodsName"] = rule.get("goodsName", "")
         merged["brand"] = normalize_brand(rule.get("brand", ""))
-        merged["netWeight"] = packing.get("partWeights", {}).get(normalize_part(item["partNo"]), "")
-        merged["grossWeight"] = packing.get("partGrossWeights", {}).get(normalize_part(item["partNo"]), "")
+        merged["netWeight"] = part_lookup(packing.get("partWeights", {}), item["partNo"])
+        merged["grossWeight"] = part_lookup(packing.get("partGrossWeights", {}), item["partNo"])
+        if conflict:
+            rule_conflicts.append(
+                f"{item['partNo']}（冲突料号：{'、'.join(conflict.get('parts', []))}）"
+            )
         if not merged["hsCode"] or not merged["goodsName"]:
             missing_rules.append(item["partNo"])
         enriched.append(merged)
 
+    if rule_conflicts:
+        warnings.append(
+            "以下料号按新标准化规则匹配到多条不同商品主数据，已停止自动取值："
+            + "；".join(rule_conflicts[:20])
+        )
     if missing_rules:
         warnings.append("以下 Part No. 未完整匹配到 HS/商品名称规则：" + "、".join(missing_rules[:20]))
 
@@ -1970,6 +2191,175 @@ def commodity_marker_blocks(markers):
                     break
         result.append(block)
     return result
+
+
+def shift_cell_ref_row(ref, row_delta):
+    match = re.fullmatch(r"(\$?[A-Z]+)(\$?)(\d+)", ref or "")
+    if not match:
+        return ref
+    return f"{match.group(1)}{match.group(2)}{int(match.group(3)) + row_delta}"
+
+
+def shift_range_rows(ref, threshold_row, row_delta):
+    shifted = []
+    for cell in (ref or "").split(":"):
+        match = re.fullmatch(r"(\$?[A-Z]+)(\$?)(\d+)", cell)
+        if not match:
+            shifted.append(cell)
+            continue
+        row = int(match.group(3))
+        if row >= threshold_row:
+            row += row_delta
+        shifted.append(f"{match.group(1)}{match.group(2)}{row}")
+    return ":".join(shifted)
+
+
+def offset_row_element(row_element, row_delta):
+    row_element.attrib["r"] = str(
+        int(row_element.attrib.get("r", "0")) + row_delta
+    )
+    for cell in row_element.findall(f"{{{NS_MAIN}}}c"):
+        cell.attrib["r"] = shift_cell_ref_row(
+            cell.attrib.get("r", ""),
+            row_delta,
+        )
+
+
+def expand_marker_commodity_blocks(
+    sheet_root,
+    shared_strings,
+    required_count,
+):
+    markers = find_template_markers(sheet_root, shared_strings)
+    blocks = commodity_marker_blocks(markers)
+    if required_count <= len(blocks) or not blocks:
+        return None
+
+    item_rows = [
+        split_marker_cell_ref(block["商品项号"])[1]
+        for block in blocks
+    ]
+    last_item_row = item_rows[-1]
+    subtotal_ref = first_marker_ref(markers, "合计标签")
+    fallback_stride = (
+        item_rows[-1] - item_rows[-2]
+        if len(item_rows) > 1
+        else 3
+    )
+    subtotal_row = (
+        split_marker_cell_ref(subtotal_ref)[1]
+        if subtotal_ref
+        else last_item_row + fallback_stride
+    )
+    stride = (
+        item_rows[-1] - item_rows[-2]
+        if len(item_rows) > 1
+        else subtotal_row - last_item_row
+    )
+    if stride <= 0 or subtotal_row <= last_item_row:
+        raise ValueError(
+            "报关单模板商品明细标记行结构不正确，无法自动扩展"
+        )
+
+    additional_blocks = required_count - len(blocks)
+    inserted_rows = additional_blocks * stride
+    source_start = last_item_row
+    source_end = subtotal_row - 1
+    sheet_data = sheet_root.find(f"{{{NS_MAIN}}}sheetData")
+    if sheet_data is None:
+        raise ValueError("报关单模板缺少 sheetData，无法自动扩展")
+
+    source_rows = [
+        copy.deepcopy(row)
+        for row in sheet_data.findall(f"{{{NS_MAIN}}}row")
+        if source_start
+        <= int(row.attrib.get("r", "0"))
+        <= source_end
+    ]
+    if not source_rows:
+        raise ValueError("报关单模板没有可复制的商品明细行")
+
+    for row in sheet_data.findall(f"{{{NS_MAIN}}}row"):
+        if int(row.attrib.get("r", "0")) >= subtotal_row:
+            offset_row_element(row, inserted_rows)
+
+    merge_cells = sheet_root.find(f"{{{NS_MAIN}}}mergeCells")
+    source_merge_refs = []
+    if merge_cells is not None:
+        for merge_cell in merge_cells.findall(
+            f"{{{NS_MAIN}}}mergeCell"
+        ):
+            ref = merge_cell.attrib.get("ref", "")
+            row_numbers = []
+            for cell in ref.split(":"):
+                match = re.search(r"(\d+)$", cell)
+                if match:
+                    row_numbers.append(int(match.group(1)))
+            if (
+                row_numbers
+                and min(row_numbers) >= source_start
+                and max(row_numbers) <= source_end
+            ):
+                source_merge_refs.append(ref)
+            merge_cell.attrib["ref"] = shift_range_rows(
+                ref,
+                subtotal_row,
+                inserted_rows,
+            )
+
+    for block_index in range(1, additional_blocks + 1):
+        row_delta = block_index * stride
+        for source_row in source_rows:
+            cloned_row = copy.deepcopy(source_row)
+            offset_row_element(cloned_row, row_delta)
+            sheet_data.append(cloned_row)
+        if merge_cells is not None:
+            for ref in source_merge_refs:
+                cloned_merge = ET.SubElement(
+                    merge_cells,
+                    f"{{{NS_MAIN}}}mergeCell",
+                )
+                cloned_merge.attrib["ref"] = shift_range_rows(
+                    ref,
+                    source_start,
+                    row_delta,
+                )
+
+    rows = list(sheet_data.findall(f"{{{NS_MAIN}}}row"))
+    for row in rows:
+        sheet_data.remove(row)
+    for row in sorted(
+        rows,
+        key=lambda item: int(item.attrib.get("r", "0")),
+    ):
+        sheet_data.append(row)
+    if merge_cells is not None:
+        merge_cells.attrib["count"] = str(
+            len(merge_cells.findall(f"{{{NS_MAIN}}}mergeCell"))
+        )
+    return {
+        "insertRow": subtotal_row,
+        "insertedRows": inserted_rows,
+    }
+
+
+def shift_drawing_rows(drawing_xml, insert_row, inserted_rows):
+    root = ET.fromstring(drawing_xml)
+    namespace = (
+        "http://schemas.openxmlformats.org/drawingml/"
+        "2006/spreadsheetDrawing"
+    )
+    threshold = insert_row - 1
+    changed = False
+    for row_node in root.findall(f".//{{{namespace}}}row"):
+        try:
+            value = int(row_node.text or "0")
+        except ValueError:
+            continue
+        if value >= threshold:
+            row_node.text = str(value + inserted_rows)
+            changed = True
+    return serialize_excel_xml(root) if changed else None
 
 
 def fill_marker_template(sheet_root, markers, preview, red_style_id=None):
@@ -2343,6 +2733,11 @@ def generate_workbook(preview):
         main_path = sheets.get("Sheet1") or next(iter(sheets.values()))
         main_root = ET.fromstring(zin.read(main_path))
         unhide_rows(main_root)
+        expansion = expand_marker_commodity_blocks(
+            main_root,
+            shared_strings,
+            len(preview["commodityLines"]),
+        )
         template_markers = find_template_markers(main_root, shared_strings)
 
         if template_markers.get("合同协议号") or template_markers.get("商品项号"):
@@ -2421,6 +2816,20 @@ def generate_workbook(preview):
 
         update_worksheet_dimension(main_root)
         modified = {main_path: serialize_excel_xml(main_root)}
+        if expansion:
+            for filename in zin.namelist():
+                if not (
+                    filename.startswith("xl/drawings/drawing")
+                    and filename.endswith(".xml")
+                ):
+                    continue
+                shifted_drawing = shift_drawing_rows(
+                    zin.read(filename),
+                    expansion["insertRow"],
+                    expansion["insertedRows"],
+                )
+                if shifted_drawing is not None:
+                    modified[filename] = shifted_drawing
         if "申报要素" in sheets:
             decl_path = sheets["申报要素"]
             decl_root = ET.fromstring(zin.read(decl_path))
@@ -2555,7 +2964,7 @@ SESSIONS = {}
 
 
 class AppHandler(BaseHTTPRequestHandler):
-    server_version = "IMOSDeclaration/1.0"
+    server_version = "SuriWorkDeclaration/1.0"
 
     def log_message(self, fmt, *args):
         print(f"[{now_stamp()}] {self.address_string()} {fmt % args}")
@@ -2582,6 +2991,48 @@ class AppHandler(BaseHTTPRequestHandler):
                 return
             if path.startswith("/static/"):
                 self.serve_static(path[len("/static/"):])
+                return
+            if path == "/api/declaration/config":
+                json_response(self, 200, {"ok": True, "active": declaration_config_status()})
+                return
+            if path == "/api/merge/config":
+                merge_service.json_response(
+                    self,
+                    200,
+                    {"ok": True, "active": merge_service.config_status()},
+                )
+                return
+            if path == "/api/merge/history":
+                merge_service.AppHandler.handle_history_list(
+                    self,
+                    urllib.parse.parse_qs(parsed.query),
+                )
+                return
+            if path.startswith("/api/merge/history/"):
+                parts = path.strip("/").split("/")
+                if len(parts) == 4:
+                    row = merge_service._history_row(parts[3])
+                    merge_service.json_response(
+                        self,
+                        200,
+                        {
+                            "ok": True,
+                            "record": merge_service.row_to_history(row, include_preview=True),
+                        },
+                    )
+                    return
+                if len(parts) == 5 and parts[4] == "download":
+                    merge_service.AppHandler.handle_history_download(
+                        self,
+                        parts[3],
+                        urllib.parse.parse_qs(parsed.query),
+                    )
+                    return
+            if path.startswith("/api/merge/download/"):
+                merge_service.AppHandler.handle_session_download(
+                    self,
+                    path.rsplit("/", 1)[-1],
+                )
                 return
             if path.startswith("/download/"):
                 self.serve_download(path.rsplit("/", 1)[-1])
@@ -2610,9 +3061,17 @@ class AppHandler(BaseHTTPRequestHandler):
                 self.handle_generate()
             elif self.path == "/api/admin/rules":
                 self.handle_admin_rules()
+            elif self.path == "/api/merge/config":
+                merge_service.AppHandler.handle_config_upload(self)
+            elif self.path == "/api/merge/preview":
+                merge_service.AppHandler.handle_preview(self)
+            elif self.path == "/api/merge/generate":
+                merge_service.AppHandler.handle_generate(self)
             else:
                 self.send_error(HTTPStatus.NOT_FOUND, "Not found")
         except Exception as exc:
+            if self.path.startswith("/api/merge/"):
+                merge_service.log_runtime_error("POST failed:\n" + traceback.format_exc())
             log_runtime_error("POST failed:\n" + traceback.format_exc())
             json_response(self, 400, {"ok": False, "error": str(exc)})
 
@@ -2620,6 +3079,9 @@ class AppHandler(BaseHTTPRequestHandler):
         try:
             parsed = urllib.parse.urlparse(self.path)
             parts = parsed.path.strip("/").split("/")
+            if len(parts) == 4 and parts[:3] == ["api", "merge", "history"]:
+                merge_service.AppHandler.handle_history_delete(self, parts[3])
+                return
             if len(parts) == 3 and parts[:2] == ["api", "history"]:
                 self.handle_history_delete(parts[2])
                 return
@@ -2651,6 +3113,19 @@ class AppHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def send_path(self, path, filename, content_type="application/octet-stream"):
+        path = Path(path)
+        if not path.is_file():
+            raise ValueError("下载文件不存在")
+        encoded = urllib.parse.quote(filename)
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Disposition", f"attachment; filename*=UTF-8''{encoded}")
+        self.send_header("Content-Length", str(path.stat().st_size))
+        self.end_headers()
+        with path.open("rb") as source:
+            shutil.copyfileobj(source, self.wfile, length=1024 * 1024)
+
     def serve_download(self, token):
         item = SESSIONS.get(token)
         if not item:
@@ -2661,7 +3136,7 @@ class AppHandler(BaseHTTPRequestHandler):
             self.send_error(HTTPStatus.NOT_FOUND, "File not found")
             return
         try:
-            validate_xlsx_file(path)
+            validate_xlsx_file(path, require_dimensions=True)
         except ValueError as exc:
             self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
             return
@@ -2740,27 +3215,64 @@ class AppHandler(BaseHTTPRequestHandler):
 
     def handle_admin_rules(self):
         ensure_app_dirs()
-        form = parse_upload(self)
-        updated = {}
-        if "template" in form and getattr(form["template"], "filename", ""):
-            path = TEMPLATE_DIR / "template.xlsx"
-            with path.open("wb") as out:
-                shutil.copyfileobj(form["template"].file, out)
-            updated["template"] = {"filename": form["template"].filename, "updatedAt": now_stamp()}
-        if "rules" in form and getattr(form["rules"], "filename", ""):
-            path = RULES_DIR / "rules.xlsx"
-            with path.open("wb") as out:
-                shutil.copyfileobj(form["rules"].file, out)
-            updated["rules"] = {"filename": form["rules"].filename, "updatedAt": now_stamp()}
-        if not updated:
-            raise ValueError("请选择要上传的模板或规则表")
-        meta_path = storage_meta_path()
-        meta = {}
-        if meta_path.exists():
-            meta = json.loads(meta_path.read_text("utf-8"))
-        meta.update(updated)
-        meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), "utf-8")
-        json_response(self, 200, {"ok": True, "updated": updated, "active": meta})
+        upload_dir = Path(tempfile.mkdtemp(prefix="declaration-config-", dir=DATA_DIR))
+        try:
+            form = parse_upload(self)
+            candidates = {}
+            for kind, fallback in (("template", "template.xlsx"), ("rules", "rules.xlsx")):
+                field = form[kind] if kind in form else None
+                if field is None or not getattr(field, "filename", ""):
+                    continue
+                original_name = safe_filename(field.filename, fallback)
+                if Path(original_name).suffix.lower() != ".xlsx":
+                    raise ValueError(f"{original_name} 必须是 .xlsx 文件")
+                path = upload_dir / f"{kind}.xlsx"
+                with path.open("wb") as out:
+                    shutil.copyfileobj(field.file, out)
+                validate_xlsx_file(path)
+                if kind == "rules":
+                    rules = load_rules(path)
+                    if not any(not key.startswith("__") for key in rules):
+                        raise ValueError("规则表中没有识别到有效的料号匹配记录")
+                candidates[kind] = {
+                    "path": path,
+                    "filename": original_name,
+                    "updatedAt": now_stamp(),
+                }
+            if not candidates:
+                raise ValueError("请选择要上传的模板或规则表")
+
+            updated = {}
+            for kind, item in candidates.items():
+                target_dir = TEMPLATE_DIR if kind == "template" else RULES_DIR
+                target_name = "template.xlsx" if kind == "template" else "rules.xlsx"
+                version_dir = target_dir / "versions"
+                version_dir.mkdir(parents=True, exist_ok=True)
+                version_name = f"{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}-{item['filename']}"
+                shutil.copy2(item["path"], version_dir / safe_filename(version_name, target_name))
+                temporary_target = target_dir / f".{target_name}.{uuid.uuid4().hex}"
+                shutil.copy2(item["path"], temporary_target)
+                os.replace(temporary_target, target_dir / target_name)
+                updated[kind] = {
+                    "filename": item["filename"],
+                    "updatedAt": item["updatedAt"],
+                }
+
+            meta_path = storage_meta_path()
+            meta = json_loads(meta_path.read_text("utf-8"), {}) if meta_path.exists() else {}
+            meta.update(updated)
+            meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), "utf-8")
+            json_response(
+                self,
+                200,
+                {
+                    "ok": True,
+                    "updated": updated,
+                    "active": declaration_config_status(),
+                },
+            )
+        finally:
+            shutil.rmtree(upload_dir, ignore_errors=True)
 
     def handle_history_list(self, query=None):
         init_db()
@@ -2838,7 +3350,7 @@ class AppHandler(BaseHTTPRequestHandler):
         if not path.exists():
             raise ValueError("历史文件不存在")
         if kind == "output":
-            validate_xlsx_file(path)
+            validate_xlsx_file(path, require_dimensions=True)
         names = {
             "invoice": record["invoiceName"] or "invoice.xls",
             "packing": record["packingName"] or "packing.xls",
@@ -2873,6 +3385,8 @@ class AppHandler(BaseHTTPRequestHandler):
 def run(host="127.0.0.1", port=None, open_browser=False):
     ensure_app_dirs()
     init_db()
+    merge_service.ensure_app_dirs()
+    merge_service.init_db()
     port = int(port if port is not None else os.environ.get("PORT", "8000"))
     url = f"http://{host}:{port}/"
     print(f"报关单生成页面: {url}")
@@ -2884,6 +3398,8 @@ def run(host="127.0.0.1", port=None, open_browser=False):
 def run_in_thread(host="127.0.0.1", port=None):
     ensure_app_dirs()
     init_db()
+    merge_service.ensure_app_dirs()
+    merge_service.init_db()
     port = int(port if port is not None else os.environ.get("PORT", "8000"))
     server = ThreadingHTTPServer((host, port), AppHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
