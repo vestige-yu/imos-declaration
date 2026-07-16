@@ -3,6 +3,7 @@ $ErrorActionPreference = "Stop"
 $RepoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 $LogicDir = Resolve-Path (Join-Path $RepoRoot "最新逻辑_请优先看")
 $ConfigFile = Resolve-Path (Join-Path $LogicDir "报关单配置关系表.xlsx")
+$DeclarationTemplateFile = Resolve-Path (Join-Path $PSScriptRoot "报关单 IMOS 空白模板.xlsx")
 $MarkedTemplateFile = Resolve-Path (Join-Path $RepoRoot "报关单模板-标记版.xlsx")
 $MarkedTemplateGuide = Resolve-Path (Join-Path $RepoRoot "模板标记维护说明.md")
 $MergeDir = Resolve-Path (Join-Path $RepoRoot "报表合并")
@@ -54,7 +55,8 @@ Copy-Item (Join-Path $LogicDir "报关单配置关系表.xlsx") $DeclarationPack
 Copy-Item (Join-Path $LogicDir "报关单生成取值逻辑说明.docx") $DeclarationPackageDir
 Copy-Item (Join-Path $LogicDir "报关单配置关系表说明文档.docx") $DeclarationPackageDir
 Copy-Item (Join-Path $LogicDir "README_最新逻辑.md") $DeclarationPackageDir
-Copy-Item $MarkedTemplateFile $DeclarationPackageDir
+Copy-Item $DeclarationTemplateFile (Join-Path $DeclarationPackageDir "报关单生成模板.xlsx")
+Copy-Item $MarkedTemplateFile (Join-Path $DeclarationPackageDir "报关单模板-标记版（维护参考）.xlsx")
 Copy-Item $MarkedTemplateGuide $DeclarationPackageDir
 
 $MergePackageDir = Join-Path $PackageDir "报表合并配置资料"
