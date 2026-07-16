@@ -34,9 +34,13 @@ jobs:
           python -m unittest discover -s tests -v 2>&1 |
             Tee-Object -FilePath declaration-test.log
           if ($LASTEXITCODE -ne 0) {
-            Get-Content declaration-test.log | ForEach-Object {
-              Write-Host "::error::$($_)"
-            }
+            $escaped = (
+              Get-Content declaration-test.log -Tail 80 |
+                ForEach-Object {
+                  $_.Replace("%", "%25").Replace("`r", "%0D").Replace("`n", "%0A")
+                }
+            ) -join "%0A"
+            Write-Host "::error title=Windows declaration test failure::$escaped"
             exit 1
           }
 
